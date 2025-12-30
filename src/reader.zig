@@ -152,87 +152,8 @@ pub const LineIterator = struct {
         }
     }
 
-    /// Reset the iterator to a specific position
-    pub fn reset(self: *LineIterator, pos: usize, line_number: usize) void {
-        self.pos = pos;
-        self.line_number = line_number;
-    }
 };
 
-/// Streaming reader for very large files (doesn't load entire file into memory)
-pub const StreamingReader = struct {
-    file: std.fs.File,
-    buffer: [BUFFER_SIZE]u8,
-    buffer_len: usize,
-    buffer_start: usize,
-    file_offset: usize,
-    line_number: usize,
-    eof: bool,
-
-    pub fn open(path: []const u8) !StreamingReader {
-        const file = try std.fs.cwd().openFile(path, .{});
-
-        var reader_instance = StreamingReader{
-            .file = file,
-            .buffer = undefined,
-            .buffer_len = 0,
-            .buffer_start = 0,
-            .file_offset = 0,
-            .line_number = 0,
-            .eof = false,
-        };
-
-        try reader_instance.fillBuffer();
-        return reader_instance;
-    }
-
-    pub fn deinit(self: *StreamingReader) void {
-        self.file.close();
-    }
-
-    fn fillBuffer(self: *StreamingReader) !void {
-        const bytes_read = try self.file.read(&self.buffer);
-        self.buffer_len = bytes_read;
-        self.buffer_start = 0;
-        self.eof = bytes_read == 0;
-    }
-
-    pub fn nextLine(self: *StreamingReader, allocator: std.mem.Allocator) !?LineIterator.Line {
-        if (self.eof and self.buffer_start >= self.buffer_len) return null;
-
-        self.line_number += 1;
-        var line = std.ArrayListUnmanaged(u8){};
-        defer line.deinit(allocator);
-
-        while (true) {
-            if (self.buffer_start >= self.buffer_len) {
-                try self.fillBuffer();
-                if (self.eof) {
-                    if (line.items.len > 0) {
-                        return LineIterator.Line{
-                            .content = try line.toOwnedSlice(allocator),
-                            .number = self.line_number,
-                        };
-                    }
-                    return null;
-                }
-            }
-
-            const remaining = self.buffer[self.buffer_start..self.buffer_len];
-            if (simd.findNewline(remaining)) |offset| {
-                try line.appendSlice(allocator, remaining[0..offset]);
-                self.buffer_start += offset + 1;
-                return LineIterator.Line{
-                    .content = try line.toOwnedSlice(allocator),
-                    .number = self.line_number,
-                };
-            } else {
-                try line.appendSlice(allocator, remaining);
-                self.buffer_start = self.buffer_len;
-            }
-        }
-    }
-};
 
 // Tests
 test "LineIterator basic" {

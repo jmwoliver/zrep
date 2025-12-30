@@ -32,6 +32,8 @@ pub const Walker = struct {
         _ = self;
     }
 
+    /// Main entry point - sequential directory collection, parallel file search
+    ///                    TODO need to make directory collection parallel
     pub fn walk(self: *Walker) !void {
         // Collect all files first, then search in parallel
         var files = std.ArrayListUnmanaged([]const u8){};
@@ -58,16 +60,9 @@ pub const Walker = struct {
             }
         }
 
-        // Now search files - use parallelism if enabled
-        const num_threads = self.config.getNumThreads();
-        if (num_threads <= 1 or files.items.len < 10) {
-            // Single-threaded for small workloads
-            for (files.items) |file_path| {
-                self.searchFile(file_path) catch {};
-            }
-        } else {
-            // Parallel search
-            try self.searchFilesParallel(files.items, num_threads);
+        // Now search files
+        for (files.items) |file_path| {
+            self.searchFile(file_path) catch {};
         }
     }
 
@@ -98,7 +93,7 @@ pub const Walker = struct {
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             // Skip hidden files/dirs unless --hidden is set
-            // Exception: .gitignore files are always searched (matches ripgrep behavior)
+            // Exception: .gitignore files are always searched
             if (!self.config.hidden and entry.name.len > 0 and entry.name[0] == '.') {
                 if (entry.kind != .file or !std.mem.eql(u8, entry.name, ".gitignore")) {
                     continue;
@@ -133,54 +128,8 @@ pub const Walker = struct {
         }
     }
 
-    fn searchFilesParallel(self: *Walker, files: []const []const u8, num_threads: usize) !void {
-        const actual_threads = @min(num_threads, files.len);
-        if (actual_threads == 0) return;
 
-        const threads = try self.allocator.alloc(std.Thread, actual_threads);
-        defer self.allocator.free(threads);
 
-        // Simple work distribution - divide files among threads
-        const files_per_thread = files.len / actual_threads;
-        const remainder = files.len % actual_threads;
-
-        var start: usize = 0;
-        for (threads, 0..) |*thread, i| {
-            const extra: usize = if (i < remainder) 1 else 0;
-            const count = files_per_thread + extra;
-            const end = start + count;
-
-            const ctx = ThreadContext{
-                .walker = self,
-                .files = files[start..end],
-            };
-
-            thread.* = try std.Thread.spawn(.{}, searchWorker, .{ctx});
-            start = end;
-        }
-
-        // Wait for all threads
-        for (threads) |thread| {
-            thread.join();
-        }
-    }
-
-    const ThreadContext = struct {
-        walker: *Walker,
-        files: []const []const u8,
-    };
-
-    fn searchWorker(ctx: ThreadContext) void {
-        // Each thread gets its own arena allocator for thread safety
-        // The main arena allocator is NOT thread-safe
-        var thread_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer thread_arena.deinit();
-        const thread_alloc = thread_arena.allocator();
-
-        for (ctx.files) |file_path| {
-            ctx.walker.searchFileWithAlloc(file_path, thread_alloc) catch {};
-        }
-    }
 
     fn searchFile(self: *Walker, path: []const u8) !void {
         return self.searchFileWithAlloc(path, self.allocator);

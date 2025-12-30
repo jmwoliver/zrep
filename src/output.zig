@@ -12,7 +12,6 @@ const Color = struct {
     const magenta = "\x1b[35m";
     const cyan = "\x1b[36m";
 
-    // ripgrep-style colors
     const path = "\x1b[35m"; // magenta for file paths
     const line_num = "\x1b[32m"; // green for line numbers
     const match = "\x1b[1m\x1b[31m"; // bold red for matches
@@ -52,11 +51,6 @@ pub const FileBuffer = struct {
         self.buffer.deinit(self.allocator);
     }
 
-    pub fn reset(self: *FileBuffer) void {
-        self.buffer.clearRetainingCapacity();
-        self.match_count = 0;
-        self.file_path = null;
-    }
 
     pub fn addMatch(self: *FileBuffer, match_data: Match) !void {
         const writer = self.buffer.writer(self.allocator);
@@ -176,71 +170,6 @@ pub const Output = struct {
         }
     }
 
-    /// Legacy single-match print (still mutex-locked, for compatibility)
-    pub fn printMatch(self: *Output, match: Match) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.config.count_only) {
-            _ = self.total_count.fetchAdd(1, .monotonic);
-            return;
-        }
-
-        var buf: [8192]u8 = undefined;
-        var writer = self.file.writer(&buf);
-
-        if (self.config.files_with_matches) {
-            if (self.use_color) {
-                try writer.interface.print("{s}{s}{s}\n", .{ Color.path, match.file_path, Color.reset });
-            } else {
-                try writer.interface.print("{s}\n", .{match.file_path});
-            }
-            try writer.interface.flush();
-            return;
-        }
-
-        // Add separator if needed
-        if (self.needs_separator) {
-            try writer.interface.print("\n", .{});
-        }
-        self.needs_separator = true;
-
-        // Print file header
-        if (self.use_color) {
-            try writer.interface.print("{s}{s}{s}\n", .{ Color.path, match.file_path, Color.reset });
-        } else {
-            try writer.interface.print("{s}\n", .{match.file_path});
-        }
-
-        // Print line with colored match
-        if (self.config.line_number) {
-            if (self.use_color) {
-                try writer.interface.print("{s}{d}{s}{s}:{s}", .{
-                    Color.line_num,
-                    match.line_number,
-                    Color.reset,
-                    Color.separator,
-                    Color.reset,
-                });
-            } else {
-                try writer.interface.print("{d}:", .{match.line_number});
-            }
-        }
-
-        // Print line content with highlighted match
-        if (self.use_color and match.match_end > match.match_start and match.match_end <= match.line_content.len) {
-            try writer.interface.print("{s}", .{match.line_content[0..match.match_start]});
-            try writer.interface.print("{s}{s}{s}", .{
-                Color.match,
-                match.line_content[match.match_start..match.match_end],
-                Color.reset,
-            });
-            try writer.interface.print("{s}\n", .{match.line_content[match.match_end..]});
-        } else {
-            try writer.interface.print("{s}\n", .{match.line_content});
-        }
-        try writer.interface.flush();
-    }
 
     pub fn printFileCount(self: *Output, file_path: []const u8, count: usize) !void {
         self.mutex.lock();

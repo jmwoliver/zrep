@@ -107,4 +107,3 @@ fi
 echo ""
 echo -e "${GREEN}=== Benchmarks Complete ===${NC}"
 echo "Results saved to $SCRIPT_DIR/results_*.md"
-
