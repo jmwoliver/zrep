@@ -228,6 +228,76 @@ pub const ParallelWalker = struct {
         return null;
     }
 
+    /// Load .gitignore files from all parent directories of the given path
+    /// This walks from the search root down to the current directory, loading
+    /// any .gitignore files found along the way. This ensures nested gitignore
+    /// patterns are properly inherited even when work items are processed out of order.
+    fn loadParentGitignores(self: *ParallelWalker, ignore_state: *gitignore.GitignoreState, dir_path: []const u8, alloc: std.mem.Allocator) void {
+        // Get the search root - we need to find which config path this directory is under
+        var search_root: []const u8 = ".";
+        for (self.config.paths) |path| {
+            if (std.mem.startsWith(u8, dir_path, path)) {
+                search_root = path;
+                break;
+            }
+        }
+
+        // Normalize search root
+        var normalized_root = search_root;
+        if (std.mem.eql(u8, normalized_root, ".") and dir_path.len >= 2 and dir_path[0] == '.' and dir_path[1] == '/') {
+            normalized_root = "./";
+        }
+
+        // Build list of directories from root to current (in order)
+        var dirs_to_check = std.ArrayListUnmanaged([]const u8){};
+        defer {
+            for (dirs_to_check.items) |d| {
+                alloc.free(d);
+            }
+            dirs_to_check.deinit(alloc);
+        }
+
+        // Start with the full path and walk up to find all parent directories
+        var current = dir_path;
+        while (current.len > 0) {
+            // Don't go above search root
+            if (current.len < search_root.len) break;
+            if (std.mem.eql(u8, search_root, ".") and !std.mem.startsWith(u8, current, "./") and current.len > 0) {
+                // For "." root, stop at the first component
+                const dup = alloc.dupe(u8, current) catch break;
+                dirs_to_check.append(alloc, dup) catch {
+                    alloc.free(dup);
+                    break;
+                };
+                break;
+            }
+
+            const dup = alloc.dupe(u8, current) catch break;
+            dirs_to_check.append(alloc, dup) catch {
+                alloc.free(dup);
+                break;
+            };
+
+            // Move to parent directory
+            if (std.mem.lastIndexOf(u8, current, "/")) |idx| {
+                if (idx == 0) break;
+                current = current[0..idx];
+            } else {
+                break;
+            }
+        }
+
+        // Reverse to process from root to current directory
+        std.mem.reverse([]const u8, dirs_to_check.items);
+
+        // Load .gitignore from each directory in order
+        for (dirs_to_check.items) |dir| {
+            const gitignore_path = std.fs.path.join(alloc, &.{ dir, ".gitignore" }) catch continue;
+            defer alloc.free(gitignore_path);
+            ignore_state.loadFile(gitignore_path, dir) catch {};
+        }
+    }
+
     /// Check if all work is done and signal termination if so
     fn checkTermination(self: *ParallelWalker, worker_id: usize) bool {
         _ = worker_id;
@@ -299,11 +369,10 @@ pub const ParallelWalker = struct {
         var ignore_state = gitignore.GitignoreState.init(alloc, self.base_ignore_matcher);
         defer ignore_state.deinit();
 
-        // Load .gitignore from this directory (only if gitignore is enabled)
+        // Load .gitignore files from all parent directories up to and including current
+        // This ensures nested .gitignore patterns are properly inherited
         if (self.base_ignore_matcher != null) {
-            const gitignore_path = std.fs.path.join(alloc, &.{ work.path, ".gitignore" }) catch return;
-            defer alloc.free(gitignore_path);
-            ignore_state.loadFile(gitignore_path, work.path) catch {};
+            self.loadParentGitignores(&ignore_state, work.path, alloc);
         }
 
         // Iterate directory entries
@@ -365,6 +434,9 @@ pub const ParallelWalker = struct {
 
     /// Search a single file for matches
     fn searchFile(self: *ParallelWalker, path: []const u8, alloc: std.mem.Allocator) !void {
+        // Skip .gitignore files (ripgrep doesn't search inside them by default)
+        if (std.mem.endsWith(u8, path, ".gitignore")) return;
+
         var content = reader.readFile(alloc, path, true) catch return;
         defer content.deinit();
 

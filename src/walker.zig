@@ -37,6 +37,17 @@ pub const Walker = struct {
     pub fn walk(self: *Walker) !void {
         const num_threads = self.config.getNumThreads();
 
+        // Load root .gitignore files for all search paths BEFORE starting parallel walk
+        // This ensures that root-level gitignore patterns are available to all workers
+        if (self.ignore_matcher != null) {
+            for (self.config.paths) |path| {
+                const stat = std.fs.cwd().statFile(path) catch continue;
+                if (stat.kind == .directory) {
+                    try self.loadGitignoreForDir(path);
+                }
+            }
+        }
+
         // Use parallel walker for multi-threaded operation
         if (num_threads > 1) {
             var pw = try parallel_walker.ParallelWalker.init(
@@ -66,11 +77,10 @@ pub const Walker = struct {
         }
 
         // Collect files from all paths
+        // Note: Root .gitignore is already loaded in walk() before calling this
         for (self.config.paths) |path| {
             const stat = std.fs.cwd().statFile(path) catch continue;
             if (stat.kind == .directory) {
-                // Load .gitignore from the root search directory
-                try self.loadGitignoreForDir(path);
                 try self.collectFiles(path, 0, &files);
             } else {
                 // Check gitignore for files passed directly
@@ -170,6 +180,9 @@ pub const Walker = struct {
     }
 
     fn searchFileWithAlloc(self: *Walker, path: []const u8, alloc: std.mem.Allocator) !void {
+        // Skip .gitignore files (ripgrep doesn't search inside them by default)
+        if (std.mem.endsWith(u8, path, ".gitignore")) return;
+
         var content = reader.readFile(alloc, path, true) catch return;
         defer content.deinit();
 

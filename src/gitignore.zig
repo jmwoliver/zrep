@@ -37,6 +37,10 @@ const Pattern = struct {
 fn getRelativePath(path: []const u8, root: []const u8) ?[]const u8 {
     // Handle empty root (current directory)
     if (root.len == 0 or std.mem.eql(u8, root, ".")) {
+        // Strip leading ./ if present to normalize paths
+        if (path.len >= 2 and path[0] == '.' and path[1] == '/') {
+            return path[2..];
+        }
         return path;
     }
 
@@ -745,6 +749,94 @@ test "gitignore anchored patterns" {
     try std.testing.expect(!matcher.isIgnoredDir("src/build"));
 }
 
+test "gitignore anchored patterns with ./ prefix" {
+    const allocator = std.testing.allocator;
+
+    var matcher = GitignoreMatcher.init(allocator);
+    defer matcher.deinit();
+
+    // Anchored pattern (with leading /)
+    try matcher.addPattern("/pkg", ".");
+
+    // Paths with ./ prefix should match anchored patterns at root
+    try std.testing.expect(matcher.isIgnoredDir("./pkg"));
+    try std.testing.expect(matcher.isIgnoredDir("pkg"));
+
+    // Should not match when nested under another directory
+    try std.testing.expect(!matcher.isIgnoredDir("./src/pkg"));
+    try std.testing.expect(!matcher.isIgnoredFile("./src/pkg/file.txt"));
+
+    // Note: Pattern /pkg (without trailing slash) matches both files and directories named "pkg"
+    // The pattern would need trailing slash like /pkg/ to only match directories
+    try std.testing.expect(matcher.isIgnoredFile("./pkg")); // Non-directory-only pattern matches files too
+}
+
+test "gitignore multiple anchored patterns with ./ prefix" {
+    const allocator = std.testing.allocator;
+
+    var matcher = GitignoreMatcher.init(allocator);
+    defer matcher.deinit();
+
+    // Multiple anchored patterns from a typical .gitignore
+    try matcher.addPattern("/pkg", ".");
+    try matcher.addPattern("/data-postgresql/", ".");
+    try matcher.addPattern("/packaging/build-*", ".");
+
+    // Test /pkg pattern
+    try std.testing.expect(matcher.isIgnoredDir("./pkg"));
+    try std.testing.expect(matcher.isIgnoredDir("pkg"));
+
+    // Test /data-postgresql/ pattern (directory-only)
+    try std.testing.expect(matcher.isIgnoredDir("./data-postgresql"));
+    try std.testing.expect(matcher.isIgnoredDir("data-postgresql"));
+    try std.testing.expect(!matcher.isIgnoredFile("data-postgresql")); // Not a file match
+
+    // Test /packaging/build-* pattern (wildcard) - these MUST pass
+    try std.testing.expect(matcher.isIgnoredDir("./packaging/build-deb"));
+    try std.testing.expect(matcher.isIgnoredDir("packaging/build-deb"));
+    try std.testing.expect(matcher.isIgnoredDir("./packaging/build-rpm"));
+    try std.testing.expect(!matcher.isIgnoredDir("./packaging/src")); // Doesn't match pattern
+}
+
+test "gitignore pattern with slash in middle" {
+    const allocator = std.testing.allocator;
+
+    var matcher = GitignoreMatcher.init(allocator);
+    defer matcher.deinit();
+
+    // Pattern with slash in the middle (like /packaging/build-*)
+    try matcher.addPattern("/packaging/build-*", ".");
+
+    // Debug: verify pattern is stored correctly
+    try std.testing.expectEqual(@as(usize, 1), matcher.patternCount());
+
+    // Should match directories with the pattern
+    try std.testing.expect(matcher.isIgnoredDir("packaging/build-deb"));
+    try std.testing.expect(matcher.isIgnoredDir("./packaging/build-deb"));
+    try std.testing.expect(matcher.isIgnoredDir("packaging/build-rpm"));
+    try std.testing.expect(matcher.isIgnoredFile("packaging/build-foo")); // File also matches (no trailing /)
+    try std.testing.expect(!matcher.isIgnoredDir("packaging/src")); // Doesn't match
+    try std.testing.expect(!matcher.isIgnoredDir("other/packaging/build-deb")); // Wrong root
+}
+
+test "gitignore pattern with absolute paths" {
+    const allocator = std.testing.allocator;
+
+    var matcher = GitignoreMatcher.init(allocator);
+    defer matcher.deinit();
+
+    // Pattern loaded with absolute root (simulating loading .gitignore with full path)
+    try matcher.addPattern("/packaging/build-*", "/tmp/gitignore_test2");
+
+    // Debug: verify pattern is stored correctly
+    try std.testing.expectEqual(@as(usize, 1), matcher.patternCount());
+
+    // Should match absolute paths
+    try std.testing.expect(matcher.isIgnoredDir("/tmp/gitignore_test2/packaging/build-deb"));
+    try std.testing.expect(matcher.isIgnoredDir("/tmp/gitignore_test2/packaging/build-rpm"));
+    try std.testing.expect(!matcher.isIgnoredDir("/tmp/gitignore_test2/packaging/src"));
+}
+
 test "getRelativePath" {
     try std.testing.expectEqualStrings("file.txt", getRelativePath("dir/file.txt", "dir").?);
     try std.testing.expectEqualStrings("sub/file.txt", getRelativePath("dir/sub/file.txt", "dir").?);
@@ -768,6 +860,15 @@ test "getRelativePath edge cases" {
     // Root with trailing slash should work
     try std.testing.expectEqualStrings("file.txt", getRelativePath("tests/fixtures/file.txt", "tests/fixtures/").?);
     try std.testing.expectEqualStrings("ignored.txt", getRelativePath("tests/fixtures/ignored.txt", "tests/fixtures/").?);
+}
+
+test "getRelativePath strips ./ prefix" {
+    // Paths with ./ prefix should be normalized when root is . or empty
+    try std.testing.expectEqualStrings("pkg", getRelativePath("./pkg", ".").?);
+    try std.testing.expectEqualStrings("pkg/mod/file.txt", getRelativePath("./pkg/mod/file.txt", ".").?);
+    try std.testing.expectEqualStrings("file.txt", getRelativePath("./file.txt", ".").?);
+    try std.testing.expectEqualStrings("pkg", getRelativePath("./pkg", "").?);
+    try std.testing.expectEqualStrings("a/b/c", getRelativePath("./a/b/c", ".").?);
 }
 
 test "glob question mark" {
@@ -802,6 +903,11 @@ test "glob single star does not cross slash" {
     try std.testing.expect(!globMatch("*.txt", "dir/file.txt"));
     try std.testing.expect(globMatch("src/*.zig", "src/main.zig"));
     try std.testing.expect(!globMatch("src/*.zig", "src/sub/main.zig"));
+
+    // Test patterns like /packaging/build-* which should match packaging/build-deb
+    try std.testing.expect(globMatch("packaging/build-*", "packaging/build-deb"));
+    try std.testing.expect(globMatch("packaging/build-*", "packaging/build-rpm"));
+    try std.testing.expect(!globMatch("packaging/build-*", "packaging/src"));
 }
 
 test "gitignore directory only pattern" {
