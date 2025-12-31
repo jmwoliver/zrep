@@ -1,6 +1,6 @@
 const std = @import("std");
-const simd = @import("simd.zig");
 const regex = @import("regex.zig");
+const simd = @import("simd.zig");
 
 pub const MatchResult = struct {
     start: usize,
@@ -67,15 +67,7 @@ pub const Matcher = struct {
             self.findLiteralIn(search_slice)
         else blk: {
             if (self.regex_engine) |*re| {
-                // Use literal prefix for SIMD pre-filtering if available
-                // This quickly rejects lines that can't possibly match
-                if (re.getLiteralPrefix()) |prefix| {
-                    // Fast path: check if prefix exists using SIMD
-                    if (simd.findSubstring(search_slice, prefix) == null) {
-                        break :blk null; // No prefix = no match possible
-                    }
-                }
-                // Full regex match
+                // Regex engine handles literal filtering internally (prefix, suffix, or inner)
                 break :blk re.find(search_slice);
             }
             break :blk null;

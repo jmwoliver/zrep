@@ -67,6 +67,20 @@ pub fn findSubstring(haystack: []const u8, needle: []const u8) ?usize {
 
 
 
+/// Find a substring starting from a given offset
+/// Returns the position relative to the start of haystack (not the offset)
+pub fn findSubstringFrom(haystack: []const u8, needle: []const u8, start: usize) ?usize {
+    if (start >= haystack.len) return null;
+    if (needle.len == 0) return start;
+    if (start + needle.len > haystack.len) return null;
+
+    // Search in the slice starting from offset
+    if (findSubstring(haystack[start..], needle)) |pos| {
+        return start + pos;
+    }
+    return null;
+}
+
 /// Find the next newline character
 pub fn findNewline(haystack: []const u8) ?usize {
     var i: usize = 0;
@@ -158,6 +172,34 @@ test "findNewline multiple newlines" {
     // Should return first newline
     try std.testing.expectEqual(@as(?usize, 1), findNewline("a\nb\nc"));
     try std.testing.expectEqual(@as(?usize, 0), findNewline("\n\n\n"));
+}
+
+test "findSubstringFrom basic" {
+    const data = "hello world, hello universe";
+    // Find first "hello" starting from 0
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringFrom(data, "hello", 0));
+    // Find second "hello" starting from 1
+    try std.testing.expectEqual(@as(?usize, 13), findSubstringFrom(data, "hello", 1));
+    // Find "world" starting from 0
+    try std.testing.expectEqual(@as(?usize, 6), findSubstringFrom(data, "world", 0));
+    // Find "world" starting after "world"
+    try std.testing.expectEqual(@as(?usize, null), findSubstringFrom(data, "world", 7));
+}
+
+test "findSubstringFrom at offset" {
+    const data = "abcabc";
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringFrom(data, "abc", 0));
+    try std.testing.expectEqual(@as(?usize, 3), findSubstringFrom(data, "abc", 1));
+    try std.testing.expectEqual(@as(?usize, 3), findSubstringFrom(data, "abc", 3));
+    try std.testing.expectEqual(@as(?usize, null), findSubstringFrom(data, "abc", 4));
+}
+
+test "findSubstringFrom edge cases" {
+    try std.testing.expectEqual(@as(?usize, null), findSubstringFrom("hello", "hello", 1));
+    try std.testing.expectEqual(@as(?usize, null), findSubstringFrom("hello", "world", 0));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringFrom("hello", "", 0));
+    try std.testing.expectEqual(@as(?usize, 3), findSubstringFrom("hello", "", 3));
+    try std.testing.expectEqual(@as(?usize, null), findSubstringFrom("hello", "", 10));
 }
 
 

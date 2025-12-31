@@ -1,5 +1,7 @@
 const std = @import("std");
 const matcher_mod = @import("matcher.zig");
+const literal = @import("literal.zig");
+const simd = @import("simd.zig");
 
 /// Maximum number of NFA states supported (256 states = 32 bytes bitset)
 /// This is enough for most practical regex patterns
@@ -127,8 +129,8 @@ pub const Regex = struct {
     states: std.ArrayListUnmanaged(State),
     start: usize,
     match_state: usize, // Cache the match state index for fast checking
-    literal_prefix: ?[]const u8, // Extracted literal prefix for SIMD pre-filtering
-    pattern_storage: ?[]u8, // Storage for the pattern (for prefix extraction)
+    literal_info: ?literal.LiteralInfo, // Extracted literal for SIMD pre-filtering
+    pattern_storage: ?[]u8, // Storage for the pattern (for literal extraction)
 
     pub fn compile(allocator: std.mem.Allocator, pattern: []const u8) CompileError!Regex {
         var compiler = Compiler.init(allocator);
@@ -136,70 +138,38 @@ pub const Regex = struct {
 
         var re = try compiler.compile(pattern);
 
-        // Extract literal prefix for SIMD pre-filtering
-        re.literal_prefix = extractLiteralPrefix(pattern);
+        // Extract best literal for SIMD pre-filtering (prefix, suffix, or inner)
+        const extracted_info = literal.extractBestLiteral(pattern);
 
-        // Store the pattern if we have a prefix
-        if (re.literal_prefix != null) {
+        // Store the pattern if we have a literal
+        if (extracted_info) |info| {
             re.pattern_storage = try allocator.dupe(u8, pattern);
-            // Update prefix to point to our owned copy
-            re.literal_prefix = re.pattern_storage.?[0..re.literal_prefix.?.len];
+            // Update literal to point to our owned copy
+            const lit_start = @intFromPtr(info.literal.ptr) - @intFromPtr(pattern.ptr);
+            re.literal_info = .{
+                .literal = re.pattern_storage.?[lit_start..][0..info.literal.len],
+                .position = info.position,
+                .min_offset = info.min_offset,
+            };
         }
 
         return re;
     }
 
-    /// Extract the literal prefix from a regex pattern (before any metacharacters)
-    /// Returns null if no useful literal prefix exists
-    fn extractLiteralPrefix(pattern: []const u8) ?[]const u8 {
-        if (pattern.len == 0) return null;
-
-        var end: usize = 0;
-        var i: usize = 0;
-
-        while (i < pattern.len) : (i += 1) {
-            const c = pattern[i];
-            switch (c) {
-                // Metacharacters that end literal prefix
-                '.', '*', '+', '?', '[', ']', '(', ')', '{', '}', '|', '^', '$' => break,
-                '\\' => {
-                    // Escaped character - could be literal or special
-                    if (i + 1 < pattern.len) {
-                        const escaped = pattern[i + 1];
-                        switch (escaped) {
-                            // These are special regex escapes, not literal
-                            'd', 'D', 'w', 'W', 's', 'S', 'b', 'B' => break,
-                            // These are literal characters
-                            'n', 'r', 't' => {
-                                // Can't use these in SIMD prefix search easily
-                                break;
-                            },
-                            else => {
-                                // Escaped metacharacter or regular char - skip both
-                                i += 1;
-                                end = i + 1;
-                            },
-                        }
-                    } else {
-                        break;
-                    }
-                },
-                else => {
-                    end = i + 1;
-                },
+    /// Get the literal info for SIMD pre-filtering
+    /// Returns the literal slice if available (for backward compatibility)
+    pub fn getLiteralPrefix(self: *const Regex) ?[]const u8 {
+        if (self.literal_info) |info| {
+            if (info.position == .prefix) {
+                return info.literal;
             }
-        }
-
-        // Need at least 2 characters for useful prefix
-        if (end >= 2) {
-            return pattern[0..end];
         }
         return null;
     }
 
-    /// Get the literal prefix for SIMD pre-filtering
-    pub fn getLiteralPrefix(self: *const Regex) ?[]const u8 {
-        return self.literal_prefix;
+    /// Get full literal info including position
+    pub fn getLiteralInfo(self: *const Regex) ?literal.LiteralInfo {
+        return self.literal_info;
     }
 
     pub fn deinit(self: *Regex) void {
@@ -209,9 +179,83 @@ pub const Regex = struct {
         }
     }
 
-    /// Find the first match in the input
+    /// Find the first match in the input using position-aware literal filtering
     pub fn find(self: *const Regex, input: []const u8) ?matcher_mod.MatchResult {
-        // Try matching at each position
+        if (self.literal_info) |info| {
+            return switch (info.position) {
+                .prefix => self.findWithPrefixFilter(input, info.literal),
+                .suffix => self.findWithSuffixFilter(input, info.literal),
+                .inner => self.findWithInnerFilter(input, info),
+            };
+        }
+        return self.findBruteForce(input);
+    }
+
+    /// Find using prefix literal as filter - most efficient
+    fn findWithPrefixFilter(self: *const Regex, input: []const u8, prefix: []const u8) ?matcher_mod.MatchResult {
+        var search_pos: usize = 0;
+        while (simd.findSubstringFrom(input, prefix, search_pos)) |lit_pos| {
+            // Found prefix at lit_pos, try matching from there
+            if (self.matchAt(input, lit_pos)) |end| {
+                return matcher_mod.MatchResult{
+                    .start = lit_pos,
+                    .end = end,
+                };
+            }
+            search_pos = lit_pos + 1;
+        }
+        return null;
+    }
+
+    /// Find using suffix literal as filter
+    fn findWithSuffixFilter(self: *const Regex, input: []const u8, suffix: []const u8) ?matcher_mod.MatchResult {
+        var search_pos: usize = 0;
+        while (simd.findSubstringFrom(input, suffix, search_pos)) |lit_pos| {
+            // Found suffix at lit_pos, try matching from positions before it
+            // For patterns like .*SUFFIX, start from 0
+            var start: usize = 0;
+            while (start <= lit_pos) : (start += 1) {
+                if (self.matchAt(input, start)) |end| {
+                    // Match must include the suffix
+                    if (end >= lit_pos + suffix.len) {
+                        return matcher_mod.MatchResult{
+                            .start = start,
+                            .end = end,
+                        };
+                    }
+                }
+            }
+            search_pos = lit_pos + 1;
+        }
+        return null;
+    }
+
+    /// Find using inner literal as filter
+    fn findWithInnerFilter(self: *const Regex, input: []const u8, info: literal.LiteralInfo) ?matcher_mod.MatchResult {
+        var search_pos: usize = 0;
+        while (simd.findSubstringFrom(input, info.literal, search_pos)) |lit_pos| {
+            // Found inner literal at lit_pos
+            // Start searching from (lit_pos - min_offset) or 0
+            const start_bound = if (lit_pos >= info.min_offset) lit_pos - info.min_offset else 0;
+            var start: usize = start_bound;
+            while (start <= lit_pos) : (start += 1) {
+                if (self.matchAt(input, start)) |end| {
+                    // Match must include the literal
+                    if (end > lit_pos) {
+                        return matcher_mod.MatchResult{
+                            .start = start,
+                            .end = end,
+                        };
+                    }
+                }
+            }
+            search_pos = lit_pos + 1;
+        }
+        return null;
+    }
+
+    /// Brute force find - try matching at each position (fallback)
+    fn findBruteForce(self: *const Regex, input: []const u8) ?matcher_mod.MatchResult {
         var pos: usize = 0;
         while (pos <= input.len) : (pos += 1) {
             if (self.matchAt(input, pos)) |end| {
@@ -340,7 +384,7 @@ const Compiler = struct {
             .states = self.states,
             .start = frag.start,
             .match_state = match_state,
-            .literal_prefix = null,
+            .literal_info = null,
             .pattern_storage = null,
         };
     }
@@ -878,20 +922,53 @@ test "regex literal prefix extraction" {
     var re = try Regex.compile(allocator, "hello.*world");
     defer re.deinit();
 
-    const prefix = re.getLiteralPrefix();
-    try std.testing.expect(prefix != null);
-    try std.testing.expectEqualStrings("hello", prefix.?);
+    const info = re.getLiteralInfo();
+    try std.testing.expect(info != null);
+    try std.testing.expectEqualStrings("hello", info.?.literal);
+    try std.testing.expectEqual(literal.LiteralInfo.Position.prefix, info.?.position);
 }
 
-test "regex literal prefix no prefix" {
+test "regex literal suffix extraction" {
     const allocator = std.testing.allocator;
 
-    // Pattern starting with metacharacter
-    var re = try Regex.compile(allocator, ".*hello");
+    // Pattern starting with metacharacter - should extract suffix
+    var re = try Regex.compile(allocator, ".*_PLATFORM");
     defer re.deinit();
 
-    const prefix = re.getLiteralPrefix();
-    try std.testing.expect(prefix == null);
+    const info = re.getLiteralInfo();
+    try std.testing.expect(info != null);
+    try std.testing.expectEqualStrings("_PLATFORM", info.?.literal);
+    try std.testing.expectEqual(literal.LiteralInfo.Position.suffix, info.?.position);
+}
+
+test "regex suffix pattern matching" {
+    const allocator = std.testing.allocator;
+
+    var re = try Regex.compile(allocator, ".*_PLATFORM");
+    defer re.deinit();
+
+    // Should find matches
+    const result1 = re.find("CONFIG_PLATFORM");
+    try std.testing.expect(result1 != null);
+    try std.testing.expectEqual(@as(usize, 0), result1.?.start);
+
+    const result2 = re.find("MY_PLATFORM");
+    try std.testing.expect(result2 != null);
+
+    // Should not match without suffix
+    try std.testing.expect(re.find("PLATFORM_CONFIG") == null);
+    try std.testing.expect(re.find("no match here") == null);
+}
+
+test "regex no literal extraction for pure regex" {
+    const allocator = std.testing.allocator;
+
+    // Pattern with no extractable literal
+    var re = try Regex.compile(allocator, "[a-z]+");
+    defer re.deinit();
+
+    const info = re.getLiteralInfo();
+    try std.testing.expect(info == null);
 }
 
 test "regex compile error unmatched paren" {
