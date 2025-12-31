@@ -66,7 +66,7 @@ fn getRelativePath(path: []const u8, root: []const u8) ?[]const u8 {
 }
 
 /// Simple glob pattern matcher
-fn globMatch(pattern: []const u8, text: []const u8) bool {
+pub fn globMatch(pattern: []const u8, text: []const u8) bool {
     var p: usize = 0;
     var t: usize = 0;
     var star_p: ?usize = null;
@@ -205,6 +205,106 @@ fn patternContainsSlash(pattern: []const u8) bool {
         }
     }
     return false;
+}
+
+const main = @import("main.zig");
+
+/// Check if a path matches the given glob patterns from -g/--glob flags.
+/// Returns true if the path should be included in the search.
+///
+/// Logic:
+/// - If no patterns: include all files
+/// - If any inclusion patterns exist (non-negated), path must match at least one
+/// - If path matches any exclusion pattern (negated with !), exclude it
+/// - For directory patterns ending with /, match against path with appended /
+pub fn matchesGlobPatterns(path: []const u8, is_dir: bool, patterns: []const main.GlobPattern) bool {
+    if (patterns.len == 0) return true;
+
+    // Check if there are any inclusion patterns (non-negated)
+    var has_file_inclusion = false;
+    var has_dir_inclusion = false;
+    var matches_inclusion = false;
+
+    for (patterns) |pat| {
+        if (!pat.negated) {
+            // For directory-only patterns (ending with /), only match directories
+            if (pat.pattern.len > 0 and pat.pattern[pat.pattern.len - 1] == '/') {
+                has_dir_inclusion = true;
+                if (is_dir) {
+                    const pattern_without_slash = pat.pattern[0 .. pat.pattern.len - 1];
+                    if (matchPath(pattern_without_slash, path)) {
+                        matches_inclusion = true;
+                    }
+                }
+            } else {
+                has_file_inclusion = true;
+                if (matchPath(pat.pattern, path)) {
+                    matches_inclusion = true;
+                }
+            }
+        }
+    }
+
+    // Apply inclusion logic:
+    // - If we're checking a directory and there's only file inclusion patterns (like *.zig),
+    //   always include directories so we can recurse into them
+    // - If we're checking a file and there are file inclusion patterns, file must match
+    // - If we're checking a directory and there are dir inclusion patterns, dir must match
+    if (is_dir) {
+        // Only filter directories if there are directory-specific inclusion patterns
+        if (has_dir_inclusion and !matches_inclusion) {
+            return false;
+        }
+        // File inclusion patterns (*.zig) don't filter directories
+    } else {
+        // Files must match if there are file inclusion patterns
+        if (has_file_inclusion and !matches_inclusion) {
+            return false;
+        }
+    }
+
+    // Check exclusion patterns (negated with !)
+    for (patterns) |pat| {
+        if (pat.negated) {
+            // For directory-only patterns (ending with /), only match directories
+            if (pat.pattern.len > 0 and pat.pattern[pat.pattern.len - 1] == '/') {
+                if (is_dir) {
+                    const pattern_without_slash = pat.pattern[0 .. pat.pattern.len - 1];
+                    if (matchPath(pattern_without_slash, path)) {
+                        return false;
+                    }
+                }
+            } else {
+                if (matchPath(pat.pattern, path)) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+/// Match a glob pattern against a path.
+/// For patterns without /, match against basename only.
+/// For patterns with /, match against the full path.
+fn matchPath(pattern: []const u8, path: []const u8) bool {
+    // Normalize path: strip leading ./ if present
+    const normalized_path = if (path.len >= 2 and path[0] == '.' and path[1] == '/')
+        path[2..]
+    else
+        path;
+
+    // Patterns with / or ** match against the full path
+    if (std.mem.indexOf(u8, pattern, "/") != null or
+        std.mem.indexOf(u8, pattern, "**") != null)
+    {
+        return globMatch(pattern, normalized_path);
+    }
+
+    // Patterns without / match against the basename
+    const basename = std.fs.path.basename(normalized_path);
+    return globMatch(pattern, basename);
 }
 
 /// Matcher for gitignore patterns with proper scoping
@@ -564,6 +664,26 @@ test "glob double star" {
     try std.testing.expect(globMatch("**/*.txt", "dir/file.txt"));
     try std.testing.expect(globMatch("**/*.txt", "a/b/c/file.txt"));
     try std.testing.expect(globMatch("src/**/*.zig", "src/lib/file.zig"));
+}
+
+test "glob with ./ prefix in path" {
+    // This tests the issue where paths like ./src/file.go don't match src/**/*.go
+    // Because the ./ prefix prevents matching
+    try std.testing.expect(globMatch("src/**/*.go", "src/listen.go"));
+    try std.testing.expect(globMatch("src/**/*.go", "src/store/scheduler.go"));
+
+    // The globMatch function itself doesn't normalize paths - that's done in matchPath
+    // Direct globMatch with ./ prefix won't match (expected behavior)
+    try std.testing.expect(!globMatch("src/**/*.go", "./src/listen.go"));
+}
+
+test "matchPath normalizes ./ prefix" {
+    // matchPath should strip ./ prefix before matching
+    try std.testing.expect(matchPath("src/**/*.go", "./src/listen.go"));
+    try std.testing.expect(matchPath("src/**/*.go", "./src/store/scheduler.go"));
+    try std.testing.expect(matchPath("src/**/*.go", "src/listen.go"));
+    try std.testing.expect(matchPath("src/*.go", "./src/listen.go"));
+    try std.testing.expect(!matchPath("src/**/*.go", "./vendor/foo.go"));
 }
 
 test "glob character class" {
@@ -935,4 +1055,70 @@ test "GitignoreState: no base patterns" {
     try std.testing.expect(state.isIgnoredFile("test.log"));
     try std.testing.expect(state.isIgnoredDir("build"));
     try std.testing.expect(!state.isIgnoredFile("main.zig"));
+}
+
+// Tests for matchesGlobPatterns (CLI -g flag matching)
+
+test "matchesGlobPatterns: empty patterns includes all" {
+    const patterns = [_]main.GlobPattern{};
+    try std.testing.expect(matchesGlobPatterns("file.txt", false, &patterns));
+    try std.testing.expect(matchesGlobPatterns("dir", true, &patterns));
+}
+
+test "matchesGlobPatterns: file inclusion pattern" {
+    const patterns = [_]main.GlobPattern{
+        .{ .pattern = "*.zig", .negated = false },
+    };
+    try std.testing.expect(matchesGlobPatterns("main.zig", false, &patterns));
+    try std.testing.expect(matchesGlobPatterns("src/main.zig", false, &patterns));
+    try std.testing.expect(!matchesGlobPatterns("main.rs", false, &patterns));
+    // Directories should pass through (not filtered by file patterns)
+    try std.testing.expect(matchesGlobPatterns("src", true, &patterns));
+}
+
+test "matchesGlobPatterns: directory exclusion pattern" {
+    const patterns = [_]main.GlobPattern{
+        .{ .pattern = "tests/", .negated = true },
+    };
+    // File should be included (not a directory)
+    try std.testing.expect(matchesGlobPatterns("file.txt", false, &patterns));
+    try std.testing.expect(matchesGlobPatterns("build.zig", false, &patterns));
+    // Directory "tests" should be excluded
+    try std.testing.expect(!matchesGlobPatterns("tests", true, &patterns));
+    try std.testing.expect(!matchesGlobPatterns("./tests", true, &patterns));
+    // Other directories should be included
+    try std.testing.expect(matchesGlobPatterns("src", true, &patterns));
+}
+
+test "matchesGlobPatterns: file exclusion pattern" {
+    const patterns = [_]main.GlobPattern{
+        .{ .pattern = "*.log", .negated = true },
+    };
+    // .log files should be excluded
+    try std.testing.expect(!matchesGlobPatterns("debug.log", false, &patterns));
+    try std.testing.expect(!matchesGlobPatterns("./error.log", false, &patterns));
+    // Other files should be included
+    try std.testing.expect(matchesGlobPatterns("main.zig", false, &patterns));
+}
+
+test "matchesGlobPatterns: combined include and exclude" {
+    const patterns = [_]main.GlobPattern{
+        .{ .pattern = "*.zig", .negated = false },
+        .{ .pattern = "main.zig", .negated = true },
+    };
+    // Include *.zig but exclude main.zig
+    try std.testing.expect(matchesGlobPatterns("walker.zig", false, &patterns));
+    try std.testing.expect(!matchesGlobPatterns("main.zig", false, &patterns));
+    try std.testing.expect(!matchesGlobPatterns("file.rs", false, &patterns));
+}
+
+test "matchesGlobPatterns: directory include pattern" {
+    const patterns = [_]main.GlobPattern{
+        .{ .pattern = "src/", .negated = false },
+    };
+    // Only directories matching src/ should be included
+    try std.testing.expect(matchesGlobPatterns("src", true, &patterns));
+    try std.testing.expect(!matchesGlobPatterns("tests", true, &patterns));
+    // Files don't have directory inclusion patterns, so they pass
+    try std.testing.expect(matchesGlobPatterns("file.txt", false, &patterns));
 }

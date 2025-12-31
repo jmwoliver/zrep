@@ -146,8 +146,10 @@ pub const ParallelWalker = struct {
                 try worker_handle.push(work_item);
                 path_idx += 1;
             } else {
-                // Process individual files directly
-                self.searchFile(path, self.allocator) catch {};
+                // Process individual files directly (check glob patterns first)
+                if (gitignore.matchesGlobPatterns(path, false, self.config.glob_patterns)) {
+                    self.searchFile(path, self.allocator) catch {};
+                }
             }
         }
 
@@ -320,14 +322,20 @@ pub const ParallelWalker = struct {
             }
 
             const full_path = std.fs.path.join(alloc, &.{ work.path, entry.name }) catch continue;
+            const is_dir = entry.kind == .directory;
 
             // Check gitignore
             if (self.base_ignore_matcher != null or ignore_state.localPatternCount() > 0) {
-                const is_dir = entry.kind == .directory;
                 if (ignore_state.isIgnored(full_path, is_dir)) {
                     alloc.free(full_path);
                     continue;
                 }
+            }
+
+            // Check glob patterns from -g/--glob flags
+            if (!gitignore.matchesGlobPatterns(full_path, is_dir, self.config.glob_patterns)) {
+                alloc.free(full_path);
+                continue;
             }
 
             switch (entry.kind) {

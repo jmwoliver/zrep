@@ -79,6 +79,10 @@ pub const Walker = struct {
                         continue;
                     }
                 }
+                // Check glob patterns for files passed directly
+                if (!gitignore.matchesGlobPatterns(path, false, self.config.glob_patterns)) {
+                    continue;
+                }
                 try files.append(self.allocator, try self.allocator.dupe(u8, path));
             }
         }
@@ -131,13 +135,20 @@ pub const Walker = struct {
             const full_path = try std.fs.path.join(self.allocator, &.{ path, entry.name });
             errdefer self.allocator.free(full_path);
 
+            const is_dir = entry.kind == .directory;
+
             // Check gitignore patterns
             if (self.ignore_matcher) |im| {
-                const is_dir = entry.kind == .directory;
                 if (im.isIgnored(full_path, is_dir)) {
                     self.allocator.free(full_path);
                     continue;
                 }
+            }
+
+            // Check glob patterns from -g/--glob flags
+            if (!gitignore.matchesGlobPatterns(full_path, is_dir, self.config.glob_patterns)) {
+                self.allocator.free(full_path);
+                continue;
             }
 
             switch (entry.kind) {

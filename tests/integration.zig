@@ -305,3 +305,117 @@ test "integration: word boundary rejects partial matches" {
     try std.testing.expect(count_without >= 1);
     try std.testing.expect(count_with >= 1);
 }
+
+// ============================================================================
+// Glob pattern filtering tests (-g/--glob)
+// ============================================================================
+
+test "integration: glob include pattern" {
+    const allocator = std.testing.allocator;
+
+    // Only search .txt files
+    const result = try runZrep(allocator, &.{ "-g", "*.txt", "PATTERN", "tests/fixtures/" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find matches in .txt files
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "sample.txt") != null);
+
+    // Should NOT find matches in binary file (even though it's not .txt anyway)
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "binary.bin") == null);
+}
+
+test "integration: glob exclude pattern" {
+    const allocator = std.testing.allocator;
+
+    // Exclude .txt files (search everything else)
+    const result = try runZrep(allocator, &.{ "-g", "!*.txt", "--no-ignore", "PATTERN", "tests/fixtures/" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should NOT find matches in .txt files
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "sample.txt") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "nested.txt") == null);
+}
+
+test "integration: glob directory exclusion" {
+    const allocator = std.testing.allocator;
+
+    // Exclude subdir/ directory
+    const result = try runZrep(allocator, &.{ "-g", "!subdir/", "PATTERN", "tests/fixtures/" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find matches in root
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "sample.txt") != null);
+
+    // Should NOT find matches in subdir (excluded)
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "nested.txt") == null);
+}
+
+test "integration: glob combined include and exclude" {
+    const allocator = std.testing.allocator;
+
+    // Include .txt files but exclude those in subdir
+    const result = try runZrep(allocator, &.{ "-g", "*.txt", "-g", "!subdir/", "PATTERN", "tests/fixtures/" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find matches in root .txt files
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "sample.txt") != null);
+
+    // Should NOT find matches in subdir (excluded)
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "nested.txt") == null);
+}
+
+test "integration: glob multiple include patterns" {
+    const allocator = std.testing.allocator;
+
+    // Include both .txt and .bin files (OR logic)
+    const result = try runZrep(allocator, &.{ "-g", "*.txt", "-g", "*.bin", "PATTERN", "tests/fixtures/" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find matches in .txt files
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "sample.txt") != null);
+
+    // Binary files are skipped due to binary detection, not glob
+    // But the glob should allow them through
+}
+
+test "integration: glob long form --glob" {
+    const allocator = std.testing.allocator;
+
+    // Test --glob long form
+    const result = try runZrep(allocator, &.{ "--glob", "*.txt", "PATTERN", "tests/fixtures/" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should work the same as -g
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "sample.txt") != null);
+}
+
+test "integration: glob no match" {
+    const allocator = std.testing.allocator;
+
+    // Include only .rs files (none exist)
+    const result = try runZrep(allocator, &.{ "-g", "*.rs", "PATTERN", "tests/fixtures/" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should have no matches
+    try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
+}
+
+test "integration: glob with recursive search" {
+    const allocator = std.testing.allocator;
+
+    // Include .txt files and ensure recursive search still works
+    const result = try runZrep(allocator, &.{ "-g", "*.txt", "PATTERN", "tests/fixtures/" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find matches in both root and subdir
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "sample.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "nested.txt") != null);
+}

@@ -9,6 +9,11 @@ const matcher = @import("matcher.zig");
 pub const ColorMode = enum { auto, always, never };
 pub const HeadingMode = enum { auto, always, never };
 
+pub const GlobPattern = struct {
+    pattern: []const u8,
+    negated: bool,
+};
+
 pub const Config = struct {
     pattern: []const u8,
     paths: []const []const u8,
@@ -23,6 +28,7 @@ pub const Config = struct {
     num_threads: ?usize = null,
     color: ColorMode = .auto,
     heading: HeadingMode = .auto,
+    glob_patterns: []const GlobPattern = &.{},
 
     pub fn getNumThreads(self: Config) usize {
         return self.num_threads orelse (std.Thread.getCpuCount() catch 4);
@@ -69,6 +75,8 @@ pub fn parseArgsFromSlice(allocator: std.mem.Allocator, args: []const []const u8
     var pattern: ?[]const u8 = null;
     var paths = std.ArrayListUnmanaged([]const u8){};
     defer paths.deinit(allocator);
+    var glob_patterns = std.ArrayListUnmanaged(GlobPattern){};
+    defer glob_patterns.deinit(allocator);
 
     var config = Config{
         .pattern = undefined,
@@ -128,6 +136,29 @@ pub fn parseArgsFromSlice(allocator: std.mem.Allocator, args: []const []const u8
                 config.heading = .always;
             } else if (std.mem.eql(u8, arg, "--no-heading")) {
                 config.heading = .never;
+            } else if (std.mem.eql(u8, arg, "-g") or std.mem.eql(u8, arg, "--glob")) {
+                i += 1;
+                if (i < args.len) {
+                    const glob_arg = args[i];
+                    // Check for negation prefix (! or \! from shell escaping)
+                    if (glob_arg.len > 0 and glob_arg[0] == '!') {
+                        try glob_patterns.append(allocator, .{
+                            .pattern = glob_arg[1..],
+                            .negated = true,
+                        });
+                    } else if (glob_arg.len > 1 and glob_arg[0] == '\\' and glob_arg[1] == '!') {
+                        // Handle shell-escaped \! as negation
+                        try glob_patterns.append(allocator, .{
+                            .pattern = glob_arg[2..],
+                            .negated = true,
+                        });
+                    } else {
+                        try glob_patterns.append(allocator, .{
+                            .pattern = glob_arg,
+                            .negated = false,
+                        });
+                    }
+                }
             } else {
                 return error.InvalidArgument;
             }
@@ -151,6 +182,7 @@ pub fn parseArgsFromSlice(allocator: std.mem.Allocator, args: []const []const u8
     }
 
     config.paths = try paths.toOwnedSlice(allocator);
+    config.glob_patterns = try glob_patterns.toOwnedSlice(allocator);
 
     return config;
 }
@@ -173,6 +205,7 @@ fn printHelp() void {
         \\    -c, --count             Only show count of matching lines
         \\    -l, --files-with-matches Only show filenames with matches
         \\    -w, --word-regexp       Only match whole words
+        \\    -g, --glob GLOB         Include/exclude files or directories (! prefix to exclude)
         \\    --no-ignore             Don't respect .gitignore files
         \\    --hidden                Search hidden files and directories
         \\    -j, --threads NUM       Number of threads to use
@@ -185,6 +218,9 @@ fn printHelp() void {
         \\    zrep "TODO" src/
         \\    zrep -i "error" *.log
         \\    zrep "fn\s+\w+" --no-ignore .
+        \\    zrep "fn main" -g '*.zig'
+        \\    zrep "import" -g '*.zig' -g '!*_test.zig'
+        \\    zrep "TODO" -g '!vendor/'
         \\
     ;
     std.debug.print("{s}", .{help});
@@ -193,7 +229,7 @@ fn printHelp() void {
 fn run(allocator: std.mem.Allocator, config: Config) !void {
     // With arena allocator, no need to free individual allocations
     // The arena handles bulk deallocation at the end
-    
+
     const stdout = std.fs.File.stdout();
 
     // Create the pattern matcher
@@ -493,4 +529,70 @@ test "parseArgs flags after pattern" {
 
     try std.testing.expect(config.ignore_case);
     try std.testing.expectEqualStrings("pattern", config.pattern);
+}
+
+test "parseArgs -g glob inclusion" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "-g", "*.zig", "pattern" };
+
+    const config = try parseArgsFromSlice(allocator, &args);
+    defer allocator.free(config.paths);
+    defer allocator.free(config.glob_patterns);
+
+    try std.testing.expectEqual(@as(usize, 1), config.glob_patterns.len);
+    try std.testing.expectEqualStrings("*.zig", config.glob_patterns[0].pattern);
+    try std.testing.expect(!config.glob_patterns[0].negated);
+}
+
+test "parseArgs -g glob exclusion with !" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "-g", "!tests/", "pattern" };
+
+    const config = try parseArgsFromSlice(allocator, &args);
+    defer allocator.free(config.paths);
+    defer allocator.free(config.glob_patterns);
+
+    try std.testing.expectEqual(@as(usize, 1), config.glob_patterns.len);
+    try std.testing.expectEqualStrings("tests/", config.glob_patterns[0].pattern);
+    try std.testing.expect(config.glob_patterns[0].negated);
+}
+
+test "parseArgs -g glob exclusion with escaped \\!" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "-g", "\\!tests/", "pattern" };
+
+    const config = try parseArgsFromSlice(allocator, &args);
+    defer allocator.free(config.paths);
+    defer allocator.free(config.glob_patterns);
+
+    try std.testing.expectEqual(@as(usize, 1), config.glob_patterns.len);
+    try std.testing.expectEqualStrings("tests/", config.glob_patterns[0].pattern);
+    try std.testing.expect(config.glob_patterns[0].negated);
+}
+
+test "parseArgs multiple -g flags" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "-g", "*.zig", "-g", "!tests/", "pattern" };
+
+    const config = try parseArgsFromSlice(allocator, &args);
+    defer allocator.free(config.paths);
+    defer allocator.free(config.glob_patterns);
+
+    try std.testing.expectEqual(@as(usize, 2), config.glob_patterns.len);
+    try std.testing.expectEqualStrings("*.zig", config.glob_patterns[0].pattern);
+    try std.testing.expect(!config.glob_patterns[0].negated);
+    try std.testing.expectEqualStrings("tests/", config.glob_patterns[1].pattern);
+    try std.testing.expect(config.glob_patterns[1].negated);
+}
+
+test "parseArgs --glob long form" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "--glob", "*.rs", "pattern" };
+
+    const config = try parseArgsFromSlice(allocator, &args);
+    defer allocator.free(config.paths);
+    defer allocator.free(config.glob_patterns);
+
+    try std.testing.expectEqual(@as(usize, 1), config.glob_patterns.len);
+    try std.testing.expectEqualStrings("*.rs", config.glob_patterns[0].pattern);
 }
