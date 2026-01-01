@@ -18,8 +18,8 @@ pub const WorkItem = struct {
     /// Thread-safe allocator for WorkItems - page_allocator is safe for concurrent use
     const allocator = std.heap.page_allocator;
 
-    pub fn init(path: []const u8, depth: usize) !*WorkItem {
-        const owned_path = try allocator.dupe(u8, path);
+    pub fn init(dir_path: []const u8, depth: usize) !*WorkItem {
+        const owned_path = try allocator.dupe(u8, dir_path);
         errdefer allocator.free(owned_path);
 
         const item = try allocator.create(WorkItem);
@@ -197,6 +197,14 @@ pub const ParallelWalker = struct {
                 // Got work - process it
                 consecutive_empty = 0;
                 self.processDirectory(item, &worker_handle, thread_arena.allocator());
+
+                // Reset arena to reclaim memory after each directory
+                // This is safe because all allocations from processDirectory are
+                // temporary (paths, gitignore state) and not referenced after return.
+                // WorkItem uses page_allocator separately and is unaffected.
+                // Using .retain_capacity keeps backing pages to avoid syscall overhead.
+                _ = thread_arena.reset(.retain_capacity);
+
                 continue;
             }
 
