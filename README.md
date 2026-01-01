@@ -1,8 +1,8 @@
-# zrep
+# zipgrep
 
 A high-performance grep implementation written in Zig, inspired by [ripgrep](https://github.com/BurntSushi/ripgrep).
 
-zrep recursively searches directories for a regex pattern while respecting `.gitignore` files, with colorized output and parallel file searching.
+zipgrep recursively searches directories for a regex pattern while respecting `.gitignore` files, with colorized output and parallel file searching.
 
 ## Features
 
@@ -24,7 +24,7 @@ zrep recursively searches directories for a regex pattern while respecting `.git
 ### Homebrew (macOS)
 
 ```bash
-brew install jmwoliver/tap/zrep
+brew install jmwoliver/tap/zipgrep
 ```
 
 ### Building from source
@@ -33,13 +33,13 @@ Requires [Zig](https://ziglang.org/) 0.15.0 or later.
 
 ```bash
 # Clone the repository
-git clone https://github.com/jmwoliver/zrep.git
-cd zrep
+git clone https://github.com/jmwoliver/zipgrep.git
+cd zipgrep
 
 # Build release version
 zig build -Doptimize=ReleaseFast
 
-# Binary is at ./zig-out/bin/zrep
+# Binary is at ./zig-out/bin/zg
 ```
 
 ### Running tests
@@ -51,7 +51,7 @@ zig build test
 ## Usage
 
 ```
-zrep [OPTIONS] PATTERN [PATH ...]
+zg [OPTIONS] PATTERN [PATH ...]
 ```
 
 ### Arguments
@@ -84,60 +84,60 @@ zrep [OPTIONS] PATTERN [PATH ...]
 
 ```bash
 # Search for "TODO" in current directory
-zrep TODO
+zg TODO
 
 # Search in specific directory
-zrep "function" src/
+zg "function" src/
 
 # Case-insensitive search
-zrep -i "error" logs/
+zg -i "error" logs/
 
 # Word boundary matching (matches "test" but not "testing" or "contest")
-zrep -w "test" src/
+zg -w "test" src/
 
 # Count matches per file
-zrep -c "import" .
+zg -c "import" .
 
 # List files containing matches
-zrep -l "TODO" .
+zg -l "TODO" .
 
 # Force colored output (useful when piping)
-zrep --color always "pattern" | less -R
+zg --color always "pattern" | less -R
 
 # Search with regex
-zrep "fn.*\(" src/       # Find function definitions
-zrep "[0-9]+" data/      # Find numbers
-zrep "foo|bar" .         # Find "foo" or "bar"
+zg "fn.*\(" src/       # Find function definitions
+zg "[0-9]+" data/      # Find numbers
+zg "foo|bar" .         # Find "foo" or "bar"
 
 # File filtering with globs
-zrep "fn main" -g '*.zig'                  # Only search .zig files
-zrep "import" -g '*.zig' -g '!*_test.zig'  # Exclude test files
-zrep "TODO" -g '!vendor/'                  # Exclude vendor directory
-zrep "config" -g '*.json' -g '*.yaml'      # Search multiple file types
+zg "fn main" -g '*.zig'                  # Only search .zig files
+zg "import" -g '*.zig' -g '!*_test.zig'  # Exclude test files
+zg "TODO" -g '!vendor/'                  # Exclude vendor directory
+zg "config" -g '*.json' -g '*.yaml'      # Search multiple file types
 
 # Output format control
-zrep --heading "pattern" .      # Grouped output with file headers
-zrep --no-heading "pattern" .   # Flat file:line:content format
+zg --heading "pattern" .      # Grouped output with file headers
+zg --no-heading "pattern" .   # Flat file:line:content format
 
 # Ignore gitignore and search everything
-zrep --no-ignore "secret" .
+zg --no-ignore "secret" .
 
 # Search hidden files
-zrep --hidden "config" .
+zg --hidden "config" .
 
 # Limit search depth
-zrep -d 2 "config" .
+zg -d 2 "config" .
 
 # Control thread count
-zrep -j 1 "pattern" .    # Single-threaded (useful for debugging)
-zrep -j 8 "pattern" .    # Use 8 threads
+zg -j 1 "pattern" .    # Single-threaded (useful for debugging)
+zg -j 8 "pattern" .    # Use 8 threads
 ```
 
 ## How It Works
 
 ### SIMD-Accelerated Search
 
-zrep uses Zig's `@Vector` types for SIMD-accelerated byte searching:
+zipgrep uses Zig's `@Vector` types for SIMD-accelerated byte searching:
 
 ```zig
 const Vec = @Vector(16, u8);  // 128-bit vectors on ARM64
@@ -158,7 +158,7 @@ pub fn findByte(haystack: []const u8, needle: u8) ?usize {
 
 ### Literal String Optimization
 
-Before applying regex matching, zrep extracts literal substrings from patterns to enable fast pre-filtering:
+Before applying regex matching, zipgrep extracts literal substrings from patterns to enable fast pre-filtering:
 
 ```zig
 // For pattern "hello.*world", extract "hello" as a prefix literal
@@ -188,7 +188,7 @@ The literal extraction uses a scoring system to select the most selective litera
 
 ### Regex Engine
 
-zrep implements a Thompson NFA-based regex engine supporting:
+zipgrep implements a Thompson NFA-based regex engine supporting:
 - `.` - any character (except newline)
 - `*` - zero or more
 - `+` - one or more
@@ -209,7 +209,7 @@ zrep implements a Thompson NFA-based regex engine supporting:
 
 ### Parallelism
 
-zrep uses parallel directory traversal for concurrent file searching:
+zipgrep uses parallel directory traversal for concurrent file searching:
 
 ```zig
 // Parallel walker spawns worker threads for directory traversal
@@ -230,7 +230,7 @@ Key characteristics:
 ## Project Structure
 
 ```
-zrep/
+zipgrep/
 ├── build.zig             # Build configuration
 ├── build.zig.zon         # Package manifest
 ├── src/
@@ -254,8 +254,8 @@ zrep/
 
 ### Feature Matrix
 
-| Feature | zrep | ripgrep |
-|---------|------|---------|
+| Feature | zipgrep | ripgrep |
+|---------|--------|---------|
 | Literal search speed | ✓ Faster (small dirs) | ✓ Faster (large dirs) |
 | Full PCRE2 regex | ✗ Basic only | ✓ Full support |
 | Unicode support | ✗ ASCII only | ✓ Full Unicode |
@@ -269,38 +269,38 @@ zrep/
 | Multiline matching | ✗ No | ✓ Yes |
 | Binary size | ~500 KB | ~6.5 MB |
 
-### What zrep Supports
+### What zipgrep Supports
 
-Can use zrep when:
+Can use zipgrep when:
 
 ```bash
 # Simple literal searches in your project
-zrep "TODO" src/
-zrep "console.log" .
-zrep "import React" components/
+zg "TODO" src/
+zg "console.log" .
+zg "import React" components/
 
 # Case-insensitive literal searches
-zrep -i "error" logs/
+zg -i "error" logs/
 
 # Word boundary matching
-zrep -w "test" src/          # Matches "test" but not "testing"
-zrep -w "main" .             # Find exact "main" word
+zg -w "test" src/          # Matches "test" but not "testing"
+zg -w "main" .             # Find exact "main" word
 
 # Basic regex patterns
-zrep "fn.*\(" src/           # Function definitions
-zrep "[0-9]+" data.txt       # Numbers
-zrep "foo|bar" .             # Alternation
-zrep "test_.*.zig" src/      # Wildcards
+zg "fn.*\(" src/           # Function definitions
+zg "[0-9]+" data.txt       # Numbers
+zg "foo|bar" .             # Alternation
+zg "test_.*.zig" src/      # Wildcards
 
 # File filtering
-zrep "TODO" -g '*.py'        # Only Python files
-zrep "import" -g '!vendor/'  # Exclude vendor directory
+zg "TODO" -g '*.py'        # Only Python files
+zg "import" -g '!vendor/'  # Exclude vendor directory
 
 # Counting matches
-zrep -c "TODO" .
+zg -c "TODO" .
 
 # Finding files with matches
-zrep -l "FIXME" .
+zg -l "FIXME" .
 ```
 
 ### When to Use ripgrep Instead
@@ -312,56 +312,56 @@ Use ripgrep for these **unsupported patterns**:
 rg '\d{3}-\d{4}' .           # Phone numbers (digits)
 rg '\w+@\w+\.\w+' .          # Email-like patterns
 rg '\s+' .                   # Whitespace
-# zrep alternative: use explicit classes
-zrep '[0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]' .
-zrep '[a-zA-Z0-9]+@[a-zA-Z0-9]+' .
+# zipgrep alternative: use explicit classes
+zg '[0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]' .
+zg '[a-zA-Z0-9]+@[a-zA-Z0-9]+' .
 
 # Quantifier ranges {n,m} - NOT SUPPORTED
 rg 'a{2,4}' .                # 2 to 4 'a's
 rg '.{10,}' .                # 10+ characters
-# zrep has no equivalent
+# zipgrep has no equivalent
 
-# Lookahead/lookbehind - NOT SUPPORTED  
+# Lookahead/lookbehind - NOT SUPPORTED
 rg '(?<=\$)\d+' .            # Numbers after $
 rg 'foo(?=bar)' .            # foo followed by bar
-# zrep has no equivalent
+# zipgrep has no equivalent
 
 # Non-greedy quantifiers - NOT SUPPORTED
 rg '".*?"' .                 # Shortest quoted string
-# zrep's .* is always greedy
+# zipgrep's .* is always greedy
 
 # Backreferences - NOT SUPPORTED
 rg '(\w+)\s+\1' .            # Repeated words
-# zrep has no equivalent
+# zipgrep has no equivalent
 
 # Unicode patterns - NOT SUPPORTED
 rg '[\p{Greek}]+' .          # Greek letters
 rg '\p{Emoji}' .             # Emoji characters
-# zrep is ASCII-only
+# zipgrep is ASCII-only
 
 # Multiline patterns - NOT SUPPORTED
 rg -U 'start.*?end' .        # Match across lines
-# zrep matches line-by-line only
+# zipgrep matches line-by-line only
 
 # Context lines - NOT SUPPORTED
 rg -A 3 -B 2 'error' .       # Show surrounding lines
-# zrep has no equivalent
+# zipgrep has no equivalent
 
 # Search in compressed files - NOT SUPPORTED
 rg -z 'pattern' file.gz
-# zrep cannot read compressed files
+# zipgrep cannot read compressed files
 
 # Replace mode - NOT SUPPORTED
 rg 'old' --replace 'new' .
-# zrep is search-only
+# zipgrep is search-only
 
 # JSON output for tooling - NOT SUPPORTED
 rg --json 'pattern' .
-# zrep outputs text only
+# zipgrep outputs text only
 
 # Binary file handling - NOT SUPPORTED
 rg --binary 'pattern' binary.exe
-# zrep may produce garbled output on binary files
+# zipgrep may produce garbled output on binary files
 
 # Very large codebases (90k+ files)
 rg 'pattern' ~/linux         # ripgrep is ~1.5x faster here
@@ -369,8 +369,8 @@ rg 'pattern' ~/linux         # ripgrep is ~1.5x faster here
 
 ### Quick Reference: Regex Support
 
-| Pattern | zrep | ripgrep | Example |
-|---------|------|---------|---------|
+| Pattern | zipgrep | ripgrep | Example |
+|---------|--------|---------|---------|
 | Literal text | ✓ | ✓ | `hello` |
 | Any character | ✓ `.` | ✓ | `h.llo` → hello, hallo |
 | Zero or more | ✓ `*` | ✓ | `ab*c` → ac, abc, abbc |
@@ -381,7 +381,7 @@ rg 'pattern' ~/linux         # ripgrep is ~1.5x faster here
 | Negated class | ✓ `[^abc]` | ✓ | `[^0-9]` |
 | Range | ✓ `[a-z]` | ✓ | `[A-Za-z]` |
 | Escape sequences | ✓ `\n\t\r` | ✓ | `line1\nline2` |
-| Word boundary | ✓ `-w` flag | ✓ `-w` or `\b` | `zrep -w "word"` |
+| Word boundary | ✓ `-w` flag | ✓ `-w` or `\b` | `zg -w "word"` |
 | Digit | ✗ | ✓ `\d` | `\d+` |
 | Word char | ✗ | ✓ `\w` | `\w+` |
 | Whitespace | ✗ | ✓ `\s` | `\s+` |
@@ -395,7 +395,7 @@ rg 'pattern' ~/linux         # ripgrep is ~1.5x faster here
 
 ## Why Zig?
 
-zrep demonstrates several Zig advantages for systems programming:
+zipgrep demonstrates several Zig advantages for systems programming:
 
 1. **Explicit SIMD** - `@Vector` provides portable SIMD without relying on autovectorization
 2. **No hidden allocations** - All memory allocation is explicit and controllable
@@ -421,4 +421,3 @@ MIT License - see LICENSE file for details.
 
 - [ripgrep](https://github.com/BurntSushi/ripgrep) by Andrew Gallant - the gold standard for grep tools
 - [BurntSushi's blog post](https://blog.burntsushi.net/ripgrep/) explaining ripgrep's design decisions
-

@@ -193,10 +193,10 @@ pub fn parseArgsFromSlice(allocator: std.mem.Allocator, args: []const []const u8
 
 fn printHelp() void {
     const help =
-        \\zrep - A fast grep implementation in Zig
+        \\zipgrep - A fast grep implementation in Zig
         \\
         \\USAGE:
-        \\    zrep [OPTIONS] PATTERN [PATH ...]
+        \\    zg [OPTIONS] PATTERN [PATH ...]
         \\
         \\ARGS:
         \\    PATTERN    The pattern to search for (literal or regex)
@@ -219,12 +219,12 @@ fn printHelp() void {
         \\    --no-heading            Print file:line:content format (default for pipes)
         \\
         \\EXAMPLES:
-        \\    zrep "TODO" src/
-        \\    zrep -i "error" *.log
-        \\    zrep "fn\s+\w+" --no-ignore .
-        \\    zrep "fn main" -g '*.zig'
-        \\    zrep "import" -g '*.zig' -g '!*_test.zig'
-        \\    zrep "TODO" -g '!vendor/'
+        \\    zg "TODO" src/
+        \\    zg -i "error" *.log
+        \\    zg "fn\s+\w+" --no-ignore .
+        \\    zg "fn main" -g '*.zig'
+        \\    zg "import" -g '*.zig' -g '!*_test.zig'
+        \\    zg "TODO" -g '!vendor/'
         \\
     ;
     std.debug.print("{s}", .{help});

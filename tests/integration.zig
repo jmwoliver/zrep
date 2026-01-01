@@ -11,9 +11,9 @@ const Result = struct {
     }
 };
 
-/// Run zrep as a subprocess and capture output
-fn runZrep(allocator: std.mem.Allocator, args: []const []const u8) !Result {
-    const exe_path = "zig-out/bin/zrep";
+/// Run zg as a subprocess and capture output
+fn runZipgrep(allocator: std.mem.Allocator, args: []const []const u8) !Result {
+    const exe_path = "zig-out/bin/zg";
 
     var argv = std.ArrayListUnmanaged([]const u8){};
     defer argv.deinit(allocator);
@@ -53,7 +53,7 @@ fn runZrep(allocator: std.mem.Allocator, args: []const []const u8) !Result {
 test "integration: basic search" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "PATTERN", "tests/fixtures/sample.txt" });
+    const result = try runZipgrep(allocator, &.{ "PATTERN", "tests/fixtures/sample.txt" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -65,7 +65,7 @@ test "integration: basic search" {
 test "integration: recursive search" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -77,7 +77,7 @@ test "integration: recursive search" {
 test "integration: case insensitive" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "-i", "pattern", "tests/fixtures/sample.txt" });
+    const result = try runZipgrep(allocator, &.{ "-i", "pattern", "tests/fixtures/sample.txt" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -94,7 +94,7 @@ test "integration: case insensitive" {
 test "integration: count mode" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "-c", "PATTERN", "tests/fixtures/sample.txt" });
+    const result = try runZipgrep(allocator, &.{ "-c", "PATTERN", "tests/fixtures/sample.txt" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -105,7 +105,7 @@ test "integration: count mode" {
 test "integration: files only mode" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "-l", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "-l", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -118,7 +118,7 @@ test "integration: files only mode" {
 test "integration: hidden files excluded by default" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -129,7 +129,7 @@ test "integration: hidden files excluded by default" {
 test "integration: hidden files included with flag" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "--hidden", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "--hidden", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -140,7 +140,7 @@ test "integration: hidden files included with flag" {
 test "integration: gitignore respected" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -153,7 +153,7 @@ test "integration: gitignore respected" {
 test "integration: gitignore bypassed with flag" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "--no-ignore", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "--no-ignore", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -164,7 +164,7 @@ test "integration: gitignore bypassed with flag" {
 test "integration: max depth" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "-d", "0", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "-d", "0", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -175,7 +175,7 @@ test "integration: max depth" {
 test "integration: no matches" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "NONEXISTENT_PATTERN_XYZ", "tests/fixtures/sample.txt" });
+    const result = try runZipgrep(allocator, &.{ "NONEXISTENT_PATTERN_XYZ", "tests/fixtures/sample.txt" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -187,7 +187,7 @@ test "integration: regex pattern with dot" {
     const allocator = std.testing.allocator;
 
     // Use a simple regex with . (dot) which matches any single character
-    const result = try runZrep(allocator, &.{ "PAT.ERN", "tests/fixtures/sample.txt" });
+    const result = try runZipgrep(allocator, &.{ "PAT.ERN", "tests/fixtures/sample.txt" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -199,7 +199,7 @@ test "integration: regex pattern with dot-star" {
     const allocator = std.testing.allocator;
 
     // Test .* quantifier (zero or more of any character)
-    const result = try runZrep(allocator, &.{ "PAT.*ERN", "tests/fixtures/sample.txt" });
+    const result = try runZipgrep(allocator, &.{ "PAT.*ERN", "tests/fixtures/sample.txt" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -211,7 +211,7 @@ test "integration: regex pattern with plus" {
     const allocator = std.testing.allocator;
 
     // Test + quantifier (one or more)
-    const result = try runZrep(allocator, &.{ "PAT+ERN", "tests/fixtures/sample.txt" });
+    const result = try runZipgrep(allocator, &.{ "PAT+ERN", "tests/fixtures/sample.txt" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -222,7 +222,7 @@ test "integration: regex pattern with plus" {
 test "integration: no-heading format" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "--no-heading", "PATTERN", "tests/fixtures/sample.txt" });
+    const result = try runZipgrep(allocator, &.{ "--no-heading", "PATTERN", "tests/fixtures/sample.txt" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -239,7 +239,7 @@ test "integration: no-heading format" {
 test "integration: binary files skipped" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{ "PATTERN", "tests/fixtures/binary.bin" });
+    const result = try runZipgrep(allocator, &.{ "PATTERN", "tests/fixtures/binary.bin" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -250,7 +250,7 @@ test "integration: binary files skipped" {
 test "integration: help flag" {
     const allocator = std.testing.allocator;
 
-    const result = try runZrep(allocator, &.{"--help"});
+    const result = try runZipgrep(allocator, &.{"--help"});
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -262,13 +262,13 @@ test "integration: word boundary flag" {
     const allocator = std.testing.allocator;
 
     // Without -w: "pattern" should match "pattern" in lowercase line
-    const result_without = try runZrep(allocator, &.{ "pattern", "tests/fixtures/sample.txt" });
+    const result_without = try runZipgrep(allocator, &.{ "pattern", "tests/fixtures/sample.txt" });
     defer allocator.free(result_without.stdout);
     defer allocator.free(result_without.stderr);
     try std.testing.expect(std.mem.indexOf(u8, result_without.stdout, "pattern lowercase") != null);
 
     // With -w: "pattern" should still match as a whole word
-    const result_with = try runZrep(allocator, &.{ "-w", "pattern", "tests/fixtures/sample.txt" });
+    const result_with = try runZipgrep(allocator, &.{ "-w", "pattern", "tests/fixtures/sample.txt" });
     defer allocator.free(result_with.stdout);
     defer allocator.free(result_with.stderr);
     try std.testing.expect(std.mem.indexOf(u8, result_with.stdout, "pattern lowercase") != null);
@@ -278,7 +278,7 @@ test "integration: word boundary rejects partial matches" {
     const allocator = std.testing.allocator;
 
     // Search for "file" - without -w should match "file" in multiple contexts
-    const result_without = try runZrep(allocator, &.{ "file", "tests/fixtures/sample.txt" });
+    const result_without = try runZipgrep(allocator, &.{ "file", "tests/fixtures/sample.txt" });
     defer allocator.free(result_without.stdout);
     defer allocator.free(result_without.stderr);
 
@@ -290,7 +290,7 @@ test "integration: word boundary rejects partial matches" {
     }
 
     // With -w: should only match "file" as a whole word
-    const result_with = try runZrep(allocator, &.{ "-w", "file", "tests/fixtures/sample.txt" });
+    const result_with = try runZipgrep(allocator, &.{ "-w", "file", "tests/fixtures/sample.txt" });
     defer allocator.free(result_with.stdout);
     defer allocator.free(result_with.stderr);
 
@@ -314,7 +314,7 @@ test "integration: glob include pattern" {
     const allocator = std.testing.allocator;
 
     // Only search .txt files
-    const result = try runZrep(allocator, &.{ "-g", "*.txt", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "-g", "*.txt", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -329,7 +329,7 @@ test "integration: glob exclude pattern" {
     const allocator = std.testing.allocator;
 
     // Exclude .txt files (search everything else)
-    const result = try runZrep(allocator, &.{ "-g", "!*.txt", "--no-ignore", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "-g", "!*.txt", "--no-ignore", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -342,7 +342,7 @@ test "integration: glob directory exclusion" {
     const allocator = std.testing.allocator;
 
     // Exclude subdir/ directory
-    const result = try runZrep(allocator, &.{ "-g", "!subdir/", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "-g", "!subdir/", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -357,7 +357,7 @@ test "integration: glob combined include and exclude" {
     const allocator = std.testing.allocator;
 
     // Include .txt files but exclude those in subdir
-    const result = try runZrep(allocator, &.{ "-g", "*.txt", "-g", "!subdir/", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "-g", "*.txt", "-g", "!subdir/", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -372,7 +372,7 @@ test "integration: glob multiple include patterns" {
     const allocator = std.testing.allocator;
 
     // Include both .txt and .bin files (OR logic)
-    const result = try runZrep(allocator, &.{ "-g", "*.txt", "-g", "*.bin", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "-g", "*.txt", "-g", "*.bin", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -387,7 +387,7 @@ test "integration: glob long form --glob" {
     const allocator = std.testing.allocator;
 
     // Test --glob long form
-    const result = try runZrep(allocator, &.{ "--glob", "*.txt", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "--glob", "*.txt", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -399,7 +399,7 @@ test "integration: glob no match" {
     const allocator = std.testing.allocator;
 
     // Include only .rs files (none exist)
-    const result = try runZrep(allocator, &.{ "-g", "*.rs", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "-g", "*.rs", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -411,7 +411,7 @@ test "integration: glob with recursive search" {
     const allocator = std.testing.allocator;
 
     // Include .txt files and ensure recursive search still works
-    const result = try runZrep(allocator, &.{ "-g", "*.txt", "PATTERN", "tests/fixtures/" });
+    const result = try runZipgrep(allocator, &.{ "-g", "*.txt", "PATTERN", "tests/fixtures/" });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -439,7 +439,7 @@ test "integration: word boundary with greedy .* prefix finds valid match" {
     // Third one has a space after (valid word boundary)
     // Fourth has word char after (not word boundary)
     const test_content = "x_cache_y z_cache_w valid_cache here_cache_end\n";
-    const temp_path = "/tmp/zrep_test_word_boundary.txt";
+    const temp_path = "/tmp/zipgrep_test_word_boundary.txt";
 
     // Write test file
     {
@@ -449,8 +449,8 @@ test "integration: word boundary with greedy .* prefix finds valid match" {
     }
     defer std.fs.cwd().deleteFile(temp_path) catch {};
 
-    // Run zrep with -w flag
-    const result = try runZrep(allocator, &.{ "-w", ".*_cache", temp_path });
+    // Run zg with -w flag
+    const result = try runZipgrep(allocator, &.{ "-w", ".*_cache", temp_path });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -467,7 +467,7 @@ test "integration: word boundary with greedy .* prefix no valid match" {
 
     // All _cache occurrences have word characters after them
     const test_content = "x_cache_y z_cache_w a_cache_b\n";
-    const temp_path = "/tmp/zrep_test_no_word_boundary.txt";
+    const temp_path = "/tmp/zipgrep_test_no_word_boundary.txt";
 
     // Write test file
     {
@@ -477,8 +477,8 @@ test "integration: word boundary with greedy .* prefix no valid match" {
     }
     defer std.fs.cwd().deleteFile(temp_path) catch {};
 
-    // Run zrep with -w flag
-    const result = try runZrep(allocator, &.{ "-w", ".*_cache", temp_path });
+    // Run zg with -w flag
+    const result = try runZipgrep(allocator, &.{ "-w", ".*_cache", temp_path });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -508,7 +508,7 @@ test "integration: word boundary with greedy .* long line" {
     }
     try content.append(allocator, '\n');
 
-    const temp_path = "/tmp/zrep_test_long_line.txt";
+    const temp_path = "/tmp/zipgrep_test_long_line.txt";
 
     // Write test file
     {
@@ -518,8 +518,8 @@ test "integration: word boundary with greedy .* long line" {
     }
     defer std.fs.cwd().deleteFile(temp_path) catch {};
 
-    // Run zrep with -w flag
-    const result = try runZrep(allocator, &.{ "-w", ".*_cache", temp_path });
+    // Run zg with -w flag
+    const result = try runZipgrep(allocator, &.{ "-w", ".*_cache", temp_path });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
@@ -536,7 +536,7 @@ test "integration: word boundary .* match at end of line" {
 
     // _suffix at end of line has implicit word boundary (end of string)
     const test_content = "prefix_suffix_more text_suffix\n";
-    const temp_path = "/tmp/zrep_test_end_boundary.txt";
+    const temp_path = "/tmp/zipgrep_test_end_boundary.txt";
 
     // Write test file
     {
@@ -546,8 +546,8 @@ test "integration: word boundary .* match at end of line" {
     }
     defer std.fs.cwd().deleteFile(temp_path) catch {};
 
-    // Run zrep with -w flag
-    const result = try runZrep(allocator, &.{ "-w", ".*_suffix", temp_path });
+    // Run zg with -w flag
+    const result = try runZipgrep(allocator, &.{ "-w", ".*_suffix", temp_path });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 

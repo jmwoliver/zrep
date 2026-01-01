@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     // Main executable
     const exe = b.addExecutable(.{
-        .name = "zrep",
+        .name = "zg",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run zrep");
+    const run_step = b.step("run", "Run zipgrep");
     run_step.dependOn(&run_cmd.step);
 
     // Unit tests for main module

@@ -1,8 +1,8 @@
-# zrep Performance Analysis and Optimization Plan
+# zipgrep Performance Analysis and Optimization Plan
 
 ## Executive Summary
 
-After deep analysis of zrep's architecture, I've identified **critical performance bottlenecks** and optimization opportunities. The codebase has a solid foundation but several areas are leaving significant performance on the table compared to ripgrep.
+After deep analysis of zipgrep's architecture, I've identified **critical performance bottlenecks** and optimization opportunities. The codebase has a solid foundation but several areas are leaving significant performance on the table compared to ripgrep.
 
 ---
 
@@ -137,31 +137,31 @@ Could use stack-allocated buffer with `std.fmt.bufPrint`.
 ### 1. Instruments (macOS) - CPU Profiling
 ```bash
 # Time Profiler
-xcrun xctrace record --template 'Time Profiler' --launch -- ./zig-out/bin/zrep "pattern" ~/large-codebase
+xcrun xctrace record --template 'Time Profiler' --launch -- ./zig-out/bin/zg "pattern" ~/large-codebase
 
 # System Call Analysis
-xcrun xctrace record --template 'System Calls' --launch -- ./zig-out/bin/zrep "pattern" ~/large-codebase
+xcrun xctrace record --template 'System Calls' --launch -- ./zig-out/bin/zg "pattern" ~/large-codebase
 ```
 
 ### 2. perf (Linux)
 ```bash
 # CPU cycles and cache misses
 perf stat -e cycles,instructions,cache-references,cache-misses,branch-misses \
-    ./zig-out/bin/zrep "pattern" ~/large-codebase
+    ./zig-out/bin/zg "pattern" ~/large-codebase
 
 # Flame graph
-perf record -g ./zig-out/bin/zrep "pattern" ~/large-codebase
-perf script | stackcollapse-perf.pl | flamegraph.pl > zrep.svg
+perf record -g ./zig-out/bin/zg "pattern" ~/large-codebase
+perf script | stackcollapse-perf.pl | flamegraph.pl > zipgrep.svg
 ```
 
 ### 3. dtrace (macOS) - Syscall Analysis
 ```bash
 # Count syscalls
-sudo dtrace -n 'syscall:::entry /execname == "zrep"/ { @[probefunc] = count(); }' \
-    -c './zig-out/bin/zrep "pattern" ~/large-codebase'
+sudo dtrace -n 'syscall:::entry /execname == "zg"/ { @[probefunc] = count(); }' \
+    -c './zig-out/bin/zg "pattern" ~/large-codebase'
 
 # I/O latency
-sudo dtrace -n 'syscall::read:entry /execname == "zrep"/ { self->ts = timestamp; }
+sudo dtrace -n 'syscall::read:entry /execname == "zg"/ { self->ts = timestamp; }
                syscall::read:return /self->ts/ { @["read latency (ns)"] = quantize(timestamp - self->ts); self->ts = 0; }'
 ```
 
@@ -177,7 +177,7 @@ zig build -Doptimize=ReleaseSafe --verbose-air
 ### 5. Valgrind/Cachegrind (Linux)
 ```bash
 # Cache analysis
-valgrind --tool=cachegrind ./zig-out/bin/zrep "pattern" ~/codebase
+valgrind --tool=cachegrind ./zig-out/bin/zg "pattern" ~/codebase
 cg_annotate cachegrind.out.* > cache_report.txt
 ```
 
@@ -187,14 +187,14 @@ Already in use. Add more granular benchmarks:
 # Test specific patterns
 hyperfine --warmup 3 \
     'rg "literal_string" ~/linux' \
-    './zig-out/bin/zrep "literal_string" ~/linux' \
+    './zig-out/bin/zg "literal_string" ~/linux' \
     --export-json bench_literal.json
 
 # Test with different thread counts
 hyperfine --warmup 3 \
-    './zig-out/bin/zrep -j1 "pattern" ~/linux' \
-    './zig-out/bin/zrep -j4 "pattern" ~/linux' \
-    './zig-out/bin/zrep -j8 "pattern" ~/linux'
+    './zig-out/bin/zg -j1 "pattern" ~/linux' \
+    './zig-out/bin/zg -j4 "pattern" ~/linux' \
+    './zig-out/bin/zg -j8 "pattern" ~/linux'
 ```
 
 ---
@@ -386,9 +386,9 @@ const debug_allocator = std.heap.DebugAllocator(.{
 #### macOS malloc debugging
 ```bash
 # Track all allocations
-MallocStackLogging=1 ./zig-out/bin/zrep "pattern" ~/codebase 2> malloc.log
+MallocStackLogging=1 ./zig-out/bin/zg "pattern" ~/codebase 2> malloc.log
 # Analyze with
-leaks --atExit -- ./zig-out/bin/zrep "pattern" ~/codebase
+leaks --atExit -- ./zig-out/bin/zg "pattern" ~/codebase
 ```
 
 ### I/O Analysis
@@ -396,19 +396,19 @@ leaks --atExit -- ./zig-out/bin/zrep "pattern" ~/codebase
 #### File descriptor and mmap analysis
 ```bash
 # macOS - track file operations
-sudo fs_usage -f filesys zrep
+sudo fs_usage -f filesys zg
 
 # Linux - strace for syscalls
-strace -c -f ./zig-out/bin/zrep "pattern" ~/codebase 2>&1 | head -50
+strace -c -f ./zig-out/bin/zg "pattern" ~/codebase 2>&1 | head -50
 
 # Detailed I/O timing
-strace -T -e read,mmap,open ./zig-out/bin/zrep "pattern" ~/codebase
+strace -T -e read,mmap,open ./zig-out/bin/zg "pattern" ~/codebase
 ```
 
 #### Check if mmap is being used effectively
 ```bash
 # Watch memory mapping during execution
-vmmap $(pgrep zrep) | grep -E "(MALLOC|mapped)"
+vmmap $(pgrep zg) | grep -E "(MALLOC|mapped)"
 ```
 
 ### Cache Performance Analysis
@@ -416,14 +416,14 @@ vmmap $(pgrep zrep) | grep -E "(MALLOC|mapped)"
 #### CPU Cache Behavior (Linux perf)
 ```bash
 perf stat -e L1-dcache-loads,L1-dcache-load-misses,LLC-loads,LLC-load-misses \
-    ./zig-out/bin/zrep "pattern" ~/large-codebase
+    ./zig-out/bin/zg "pattern" ~/large-codebase
 
 # Calculate miss rate: misses / loads * 100
 ```
 
 #### Branch Prediction
 ```bash
-perf stat -e branches,branch-misses ./zig-out/bin/zrep "pattern" ~/codebase
+perf stat -e branches,branch-misses ./zig-out/bin/zg "pattern" ~/codebase
 # Aim for <5% branch miss rate
 ```
 
@@ -432,10 +432,10 @@ perf stat -e branches,branch-misses ./zig-out/bin/zrep "pattern" ~/codebase
 #### Lock contention visualization
 ```bash
 # macOS
-sudo spindump -i 5 -o zrep_spin.txt $(pgrep zrep)
+sudo spindump -i 5 -o zipgrep_spin.txt $(pgrep zg)
 
 # Linux - mutex contention
-perf lock record ./zig-out/bin/zrep "pattern" ~/codebase
+perf lock record ./zig-out/bin/zg "pattern" ~/codebase
 perf lock report
 ```
 
@@ -448,7 +448,7 @@ perf lock report
 # Run comprehensive benchmark
 hyperfine --warmup 3 --min-runs 10 \
     'rg "TODO" ~/large-codebase' \
-    './zig-out/bin/zrep "TODO" ~/large-codebase' \
+    './zig-out/bin/zg "TODO" ~/large-codebase' \
     --export-json baseline.json
 ```
 
@@ -456,23 +456,23 @@ hyperfine --warmup 3 --min-runs 10 \
 ```bash
 # macOS Instruments Time Profiler
 xcrun xctrace record --template 'Time Profiler' \
-    --output zrep_profile.trace \
-    --launch -- ./zig-out/bin/zrep "pattern" ~/large-codebase
+    --output zipgrep_profile.trace \
+    --launch -- ./zig-out/bin/zg "pattern" ~/large-codebase
 
 # Open in Instruments.app for analysis
-open zrep_profile.trace
+open zipgrep_profile.trace
 ```
 
 ### Step 3: Syscall Analysis
 ```bash
 # Count which syscalls dominate
-sudo dtruss -c ./zig-out/bin/zrep "pattern" ~/large-codebase 2>&1 | tail -20
+sudo dtruss -c ./zig-out/bin/zg "pattern" ~/large-codebase 2>&1 | tail -20
 ```
 
 ### Step 4: Memory Analysis
 ```bash
 # Check for excessive allocations
-MallocStackLogging=lite leaks --atExit -- ./zig-out/bin/zrep "pattern" ~/codebase
+MallocStackLogging=lite leaks --atExit -- ./zig-out/bin/zg "pattern" ~/codebase
 ```
 
 ### Step 5: Compare with ripgrep
@@ -493,8 +493,8 @@ Before major rewrites, verify these quick hypotheses:
 ```bash
 # Create a test with pure literal search vs regex
 hyperfine \
-    './zig-out/bin/zrep "EXACT_LITERAL" ~/linux' \
-    './zig-out/bin/zrep "EXACT.*LITERAL" ~/linux'
+    './zig-out/bin/zg "EXACT_LITERAL" ~/linux' \
+    './zig-out/bin/zg "EXACT.*LITERAL" ~/linux'
 ```
 If literal is much faster than regex, focus on regex optimization.
 If both are slow, focus on SIMD.
@@ -503,8 +503,8 @@ If both are slow, focus on SIMD.
 ```bash
 # Compare with files already in cache
 # First run loads files, second should be faster
-./zig-out/bin/zrep "pattern" ~/codebase > /dev/null
-./zig-out/bin/zrep "pattern" ~/codebase > /dev/null  # Should be faster
+./zig-out/bin/zg "pattern" ~/codebase > /dev/null
+./zig-out/bin/zg "pattern" ~/codebase > /dev/null  # Should be faster
 
 # If second run isn't significantly faster, I/O isn't the bottleneck
 ```
@@ -513,9 +513,9 @@ If both are slow, focus on SIMD.
 ```bash
 # Compare single vs multi-threaded
 hyperfine \
-    './zig-out/bin/zrep -j1 "pattern" ~/codebase' \
-    './zig-out/bin/zrep -j4 "pattern" ~/codebase' \
-    './zig-out/bin/zrep -j8 "pattern" ~/codebase'
+    './zig-out/bin/zg -j1 "pattern" ~/codebase' \
+    './zig-out/bin/zg -j4 "pattern" ~/codebase' \
+    './zig-out/bin/zg -j8 "pattern" ~/codebase'
 ```
 If single-threaded is faster, there's contention or thread overhead.
 

@@ -1,6 +1,6 @@
-# zrep Codebase Deep Dive: A Newcomer's Guide
+# zipgrep Codebase Deep Dive: A Newcomer's Guide
 
-This report provides a comprehensive analysis of the zrep codebase - a high-performance grep implementation written in Zig. It covers key Zig language concepts, algorithms, data structures, and optimizations that make zrep work efficiently.
+This report provides a comprehensive analysis of the zipgrep codebase - a high-performance grep implementation written in Zig. It covers key Zig language concepts, algorithms, data structures, and optimizations that make zipgrep work efficiently.
 
 ---
 
@@ -585,7 +585,7 @@ fn trySteal(self: *ParallelWalker, worker_id: usize) ?*WorkItem {
 
 ## Summary
 
-zrep achieves high performance through:
+zipgrep achieves high performance through:
 
 1. **Smart algorithm selection**: Literal patterns bypass regex entirely
 2. **SIMD-ready design**: Platform-optimal vector widths at compile time
