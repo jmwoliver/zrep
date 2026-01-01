@@ -170,6 +170,7 @@ pub const ParallelWalker = struct {
     }
 
     /// Worker thread function - creates its own arena allocator on the stack
+    /// Based on ripgrep's ignore crate pattern for efficient work-stealing
     fn workerThreadFn(self: *ParallelWalker, worker_id: usize) void {
         var worker_handle = self.deques[worker_id].?.worker();
 
@@ -183,29 +184,117 @@ pub const ParallelWalker = struct {
 
         // Wait for all workers to initialize (prevents early termination)
         while (self.initialized_workers.load(.acquire) < self.num_threads) {
-            std.Thread.yield() catch {};
+            std.atomic.spinLoopHint();
         }
 
-        while (!self.done.load(.acquire)) {
-            // 1. Try to get work from own deque (LIFO - depth first)
-            if (worker_handle.pop()) |work_item| {
-                self.processDirectory(work_item, &worker_handle, thread_arena.allocator());
+        var consecutive_empty: u32 = 0;
+
+        while (true) {
+            // Try to get work - first from own deque, then steal
+            const work_item = worker_handle.pop() orelse self.trySteal(worker_id);
+
+            if (work_item) |item| {
+                // Got work - process it
+                consecutive_empty = 0;
+                self.processDirectory(item, &worker_handle, thread_arena.allocator());
                 continue;
             }
 
-            // 2. Try stealing from other workers
-            if (self.trySteal(worker_id)) |stolen_item| {
-                self.processDirectory(stolen_item, &worker_handle, thread_arena.allocator());
-                continue;
-            }
+            // No work found - check if we should terminate or sleep
+            // This is the critical section where we need to be careful about atomics
 
-            // 3. No work found - check for termination
-            if (self.checkTermination(worker_id)) {
+            // Check if already done
+            if (self.done.load(.acquire)) {
                 break;
             }
 
-            // Brief yield before retrying
-            std.Thread.yield() catch {};
+            // Adaptive spinning - spin more on first few empty cycles
+            const spin_iterations: usize = if (consecutive_empty < 4) 128 else 32;
+            var found_work = false;
+            for (0..spin_iterations) |_| {
+                std.atomic.spinLoopHint();
+                // Quick check if work appeared in our deque
+                if (!worker_handle.deque.isEmpty()) {
+                    found_work = true;
+                    break;
+                }
+            }
+            if (found_work) continue;
+
+            // Also check other deques before sleeping (quick scan)
+            for (self.deques) |maybe_dq| {
+                if (maybe_dq) |dq| {
+                    if (!dq.isEmpty()) {
+                        found_work = true;
+                        break;
+                    }
+                }
+            }
+            if (found_work) continue;
+
+            // No work after spinning - deactivate this worker
+            const prev_active = self.active_workers.fetchSub(1, .acq_rel);
+
+            if (prev_active == 1) {
+                // We were the last active worker - check if truly done
+                var any_work = false;
+                for (self.deques) |maybe_dq| {
+                    if (maybe_dq) |dq| {
+                        if (!dq.isEmpty()) {
+                            any_work = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!any_work) {
+                    // Truly done - signal termination
+                    self.done.store(true, .release);
+                    break;
+                }
+
+                // Work exists - reactivate and continue
+                _ = self.active_workers.fetchAdd(1, .acq_rel);
+                consecutive_empty = 0;
+                continue;
+            }
+
+            // Stay deactivated and sleep until work appears or we're done
+            // This loop avoids atomic operations while idle
+            while (true) {
+                consecutive_empty = @min(consecutive_empty + 1, 20);
+                const sleep_ns: u64 = switch (consecutive_empty) {
+                    0...2 => 10_000, // 10µs - very responsive
+                    3...5 => 100_000, // 100µs
+                    6...10 => 500_000, // 500µs
+                    else => 2_000_000, // 2ms - save CPU when truly idle
+                };
+                std.Thread.sleep(sleep_ns);
+
+                // Check if done
+                if (self.done.load(.acquire)) {
+                    break;
+                }
+
+                // Check if work appeared in any deque
+                var has_work = false;
+                for (self.deques) |maybe_dq| {
+                    if (maybe_dq) |dq| {
+                        if (!dq.isEmpty()) {
+                            has_work = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (has_work) {
+                    // Work available - reactivate and exit sleep loop
+                    _ = self.active_workers.fetchAdd(1, .acq_rel);
+                    consecutive_empty = 0;
+                    break;
+                }
+                // No work - stay deactivated and sleep again
+            }
         }
     }
 
@@ -296,60 +385,6 @@ pub const ParallelWalker = struct {
             defer alloc.free(gitignore_path);
             ignore_state.loadFile(gitignore_path, dir) catch {};
         }
-    }
-
-    /// Check if all work is done and signal termination if so
-    fn checkTermination(self: *ParallelWalker, worker_id: usize) bool {
-        _ = worker_id;
-
-        // Decrement active count
-        const prev = self.active_workers.fetchSub(1, .acq_rel);
-
-        if (prev == 1) {
-            // We were the last active worker - verify all deques are truly empty
-            var any_work = false;
-            for (self.deques) |maybe_dq| {
-                if (maybe_dq) |dq| {
-                    if (!dq.isEmpty()) {
-                        any_work = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!any_work) {
-                // Truly done - signal termination
-                self.done.store(true, .release);
-                return true;
-            }
-
-            // Found work - re-increment and continue
-            _ = self.active_workers.fetchAdd(1, .acq_rel);
-            return false;
-        }
-
-        // Other workers still active - wait briefly and re-check
-        std.Thread.yield() catch {}; // Brief yield instead of sleep
-
-        // Re-check if work appeared
-        for (self.deques) |maybe_dq| {
-            if (maybe_dq) |dq| {
-                if (!dq.isEmpty()) {
-                    // Work appeared - re-increment and continue
-                    _ = self.active_workers.fetchAdd(1, .acq_rel);
-                    return false;
-                }
-            }
-        }
-
-        // Check if another worker signaled done
-        if (self.done.load(.acquire)) {
-            return true;
-        }
-
-        // Re-increment and keep trying
-        _ = self.active_workers.fetchAdd(1, .acq_rel);
-        return false;
     }
 
     /// Process a single directory

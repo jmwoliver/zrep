@@ -31,7 +31,11 @@ pub const Config = struct {
     glob_patterns: []const GlobPattern = &.{},
 
     pub fn getNumThreads(self: Config) usize {
-        return self.num_threads orelse (std.Thread.getCpuCount() catch 4);
+        if (self.num_threads) |n| return n;
+        // Default to number of CPUs, but cap at 8 to avoid syscall overhead
+        // from excessive thread wake/sleep cycles on high core count systems
+        const cpus = std.Thread.getCpuCount() catch 4;
+        return @min(cpus, 8);
     }
 };
 
