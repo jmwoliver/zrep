@@ -575,43 +575,84 @@ pub const ParallelWalker = struct {
         }
     }
 
-    /// Search a single file for matches
+    /// Search a single file for matches using streaming reader.
+    /// Uses constant ~64KB memory regardless of file size.
     fn searchFile(self: *ParallelWalker, path: []const u8, alloc: std.mem.Allocator) !void {
         // Skip .gitignore files
         if (std.mem.endsWith(u8, path, ".gitignore")) return;
 
-        var content = reader.readFile(alloc, path, true) catch return;
-        defer content.deinit();
-
-        const data = content.bytes();
-        if (data.len == 0) return;
-
-        // Binary file detection: check first 8KB for NUL bytes
-        const check_len = @min(data.len, 8192);
-        for (data[0..check_len]) |byte| {
-            if (byte == 0) return;
-        }
+        // Use streaming reader - constant memory regardless of file size
+        var stream = reader.StreamingLineReader.init(alloc, path) catch return;
+        defer stream.deinit();
 
         // Use per-file buffer to batch output - reduces mutex contention
         var file_buf = output.FileBuffer.init(alloc, self.config, self.out.colorEnabled(), self.out.headingEnabled());
         defer file_buf.deinit();
 
-        var line_iter = reader.LineIterator.init(data);
+        // For literal patterns without word boundary, use buffer-first search (much faster)
+        // This works for both case-sensitive and case-insensitive (-i) patterns
+        if (self.pattern_matcher.is_literal and !self.pattern_matcher.word_boundary) {
+            const Callback = struct {
+                file_buf: *output.FileBuffer,
+                path: []const u8,
+                config: main.Config,
+                files_with_matches: bool,
+                count_only: bool,
+                done: bool,
 
-        while (line_iter.next()) |line| {
-            if (self.pattern_matcher.findFirst(line.content)) |match_result| {
-                if (self.config.count_only) {
-                    file_buf.match_count += 1;
-                } else {
-                    try file_buf.addMatch(.{
-                        .file_path = path,
-                        .line_number = line.number,
-                        .line_content = line.content,
-                        .match_start = match_result.start,
-                        .match_end = match_result.end,
-                    });
+                pub fn call(ctx: *@This(), line: reader.StreamingLineReader.Line, match_start: usize, match_end: usize) void {
+                    if (ctx.done) return;
 
-                    if (self.config.files_with_matches) break;
+                    if (ctx.count_only) {
+                        ctx.file_buf.match_count += 1;
+                    } else {
+                        ctx.file_buf.addMatch(.{
+                            .file_path = ctx.path,
+                            .line_number = line.number,
+                            .line_content = line.content,
+                            .match_start = match_start,
+                            .match_end = match_end,
+                        }) catch {};
+
+                        if (ctx.files_with_matches) {
+                            ctx.done = true;
+                        }
+                    }
+                }
+            };
+
+            var callback = Callback{
+                .file_buf = &file_buf,
+                .path = path,
+                .config = self.config,
+                .files_with_matches = self.config.files_with_matches,
+                .count_only = self.config.count_only,
+                .done = false,
+            };
+
+            // Use case-insensitive or case-sensitive buffer search based on -i flag
+            if (self.pattern_matcher.ignore_case) {
+                _ = stream.searchLiteralIgnoreCase(self.pattern_matcher.pattern, &callback);
+            } else {
+                _ = stream.searchLiteral(self.pattern_matcher.pattern, &callback);
+            }
+        } else {
+            // For regex patterns, use line-by-line search
+            while (stream.next()) |line| {
+                if (self.pattern_matcher.findFirst(line.content)) |match_result| {
+                    if (self.config.count_only) {
+                        file_buf.match_count += 1;
+                    } else {
+                        try file_buf.addMatch(.{
+                            .file_path = path,
+                            .line_number = line.number,
+                            .line_content = line.content,
+                            .match_start = match_result.start,
+                            .match_end = match_result.end,
+                        });
+
+                        if (self.config.files_with_matches) break;
+                    }
                 }
             }
         }

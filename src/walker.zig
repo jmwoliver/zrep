@@ -281,29 +281,21 @@ pub const Walker = struct {
         }
     }
 
+    /// Search a single file using streaming reader.
+    /// Uses constant ~64KB memory regardless of file size.
     fn searchFileWithAlloc(self: *Walker, path: []const u8, alloc: std.mem.Allocator) !void {
         // Skip .gitignore files
         if (std.mem.endsWith(u8, path, ".gitignore")) return;
 
-        var content = reader.readFile(alloc, path, true) catch return;
-        defer content.deinit();
-
-        const data = content.bytes();
-        if (data.len == 0) return;
-
-        // Binary file detection: check first 8KB for NUL bytes
-        const check_len = @min(data.len, 8192);
-        for (data[0..check_len]) |byte| {
-            if (byte == 0) return; // Skip binary files
-        }
+        // Use streaming reader - constant memory regardless of file size
+        var stream = reader.StreamingLineReader.init(alloc, path) catch return;
+        defer stream.deinit();
 
         // Use per-file buffer to batch output - reduces mutex contention
         var file_buf = output.FileBuffer.init(alloc, self.config, self.out.colorEnabled(), self.out.headingEnabled());
         defer file_buf.deinit();
 
-        var line_iter = reader.LineIterator.init(data);
-
-        while (line_iter.next()) |line| {
+        while (stream.next()) |line| {
             if (self.pattern_matcher.findFirst(line.content)) |match_result| {
                 if (self.config.count_only) {
                     file_buf.match_count += 1;
