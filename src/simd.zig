@@ -121,66 +121,86 @@ fn pickRareByte(needle: []const u8) struct { byte: u8, offset: usize } {
     return .{ .byte = rarest_byte, .offset = rarest_offset };
 }
 
-/// Find a substring using SIMD-accelerated rare byte search followed by memcmp
-/// This is the "quick search" approach used by many fast string matchers
-/// Picks the rarest byte in the pattern to minimize false positives
-pub fn findSubstring(haystack: []const u8, needle: []const u8) ?usize {
-    if (needle.len == 0) return 0;
-    if (needle.len > haystack.len) return null;
+/// Two-byte SIMD substring search - checks first and last byte simultaneously
+/// This reduces false positives by ~256x compared to single-byte search
+/// Based on ripgrep's "packed pair" algorithm from the memchr crate
+fn findSubstringTwoByte(haystack: []const u8, needle: []const u8) ?usize {
+    // Preconditions: needle.len >= 2, needle.len <= haystack.len
+    const first_byte = needle[0];
+    const last_byte = needle[needle.len - 1];
+    const offset = needle.len - 1;
 
-    // Single byte optimization: use SIMD byte search
-    if (needle.len == 1) {
-        return findByte(haystack, needle[0]);
-    }
-
-    // Pick the rarest byte in the needle to search for
-    const rare = pickRareByte(needle);
-    const rare_vec: Vec = @splat(rare.byte);
+    const first_vec: Vec = @splat(first_byte);
+    const last_vec: Vec = @splat(last_byte);
     const max_pos = haystack.len - needle.len;
+
     var pos: usize = 0;
 
-    // SIMD loop - process VECTOR_WIDTH bytes at a time looking for rare byte
-    while (pos + rare.offset + VECTOR_WIDTH <= haystack.len) {
-        // Search for rare byte at its expected offset position
-        const search_start = pos + rare.offset;
-        const chunk: Vec = haystack[search_start..][0..VECTOR_WIDTH].*;
-        const cmp: BoolVec = chunk == rare_vec;
+    // SIMD loop - check first AND last byte simultaneously
+    while (pos + VECTOR_WIDTH <= max_pos + 1) {
+        // Load bytes at positions where first byte would be
+        const first_chunk: Vec = haystack[pos..][0..VECTOR_WIDTH].*;
+        // Load bytes at positions where last byte would be (offset positions forward)
+        const last_chunk: Vec = haystack[pos + offset ..][0..VECTOR_WIDTH].*;
 
-        if (@reduce(.Or, cmp)) {
-            // Found at least one rare-byte match in this chunk
-            const MaskType = std.meta.Int(.unsigned, VECTOR_WIDTH);
-            var mask: MaskType = @bitCast(cmp);
+        // Check where first byte matches
+        const first_eq: BoolVec = first_chunk == first_vec;
+        // Check where last byte matches
+        const last_eq: BoolVec = last_chunk == last_vec;
+        // AND them - only positions where BOTH match are candidates
+        // Use bitwise AND on the integer representation of the bool vectors
+        const MaskType = std.meta.Int(.unsigned, VECTOR_WIDTH);
+        const first_mask: MaskType = @bitCast(first_eq);
+        const last_mask: MaskType = @bitCast(last_eq);
+        var mask = first_mask & last_mask;
 
-            // Process all matches in this chunk
+        if (mask != 0) {
+            // Found at least one position where both first and last byte match
             while (mask != 0) {
-                const offset = @ctz(mask);
-                const candidate = pos + offset; // Start of potential needle match
+                const bit_pos = @ctz(mask);
+                const candidate = pos + bit_pos;
 
-                // Check if we have room for full needle
                 if (candidate <= max_pos) {
-                    // Verify full needle match
-                    if (std.mem.eql(u8, haystack[candidate..][0..needle.len], needle)) {
+                    // First and last byte already match, only verify middle if needed
+                    if (needle.len == 2 or
+                        std.mem.eql(u8, haystack[candidate + 1 ..][0 .. needle.len - 2], needle[1 .. needle.len - 1]))
+                    {
                         return candidate;
                     }
                 }
 
-                // Clear lowest set bit and check next match
+                // Clear lowest set bit
                 mask &= mask - 1;
             }
         }
         pos += VECTOR_WIDTH;
     }
 
-    // Scalar fallback for remaining positions
+    // Scalar fallback for tail
     while (pos <= max_pos) : (pos += 1) {
-        if (haystack[pos + rare.offset] == rare.byte) {
-            if (std.mem.eql(u8, haystack[pos..][0..needle.len], needle)) {
+        if (haystack[pos] == first_byte and haystack[pos + offset] == last_byte) {
+            if (needle.len == 2 or std.mem.eql(u8, haystack[pos..][0..needle.len], needle)) {
                 return pos;
             }
         }
     }
-
     return null;
+}
+
+/// Find a substring using SIMD-accelerated two-byte fingerprinting
+/// For patterns >= 2 bytes, searches for first AND last byte simultaneously
+/// This dramatically reduces false positives compared to single-byte search
+pub fn findSubstring(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return null;
+
+    // Single byte: use direct byte search
+    if (needle.len == 1) {
+        return findByte(haystack, needle[0]);
+    }
+
+    // Two or more bytes: use two-byte fingerprinting (first + last byte)
+    return findSubstringTwoByte(haystack, needle);
 }
 
 
@@ -213,68 +233,95 @@ fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-/// Find a substring case-insensitively using SIMD-accelerated rare byte search
-/// Searches for both uppercase and lowercase versions of the rare byte simultaneously
-pub fn findSubstringIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
-    if (needle.len == 0) return 0;
-    if (needle.len > haystack.len) return null;
+/// Two-byte case-insensitive SIMD substring search
+/// Checks both cases of first and last byte simultaneously
+fn findSubstringTwoByteIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
+    // Preconditions: needle.len >= 2, needle.len <= haystack.len
+    const first_lower = toLower(needle[0]);
+    const first_upper = if (first_lower >= 'a' and first_lower <= 'z') first_lower - 32 else first_lower;
+    const last_lower = toLower(needle[needle.len - 1]);
+    const last_upper = if (last_lower >= 'a' and last_lower <= 'z') last_lower - 32 else last_lower;
+    const offset = needle.len - 1;
 
-    // Pick the rarest byte in the needle
-    const rare = pickRareByte(needle);
-    const rare_lower = toLower(rare.byte);
-    const rare_upper = if (rare_lower >= 'a' and rare_lower <= 'z') rare_lower - 32 else rare_lower;
-
-    // Single byte optimization
-    if (needle.len == 1) {
-        return findByteIgnoreCase(haystack, rare_lower, rare_upper);
-    }
-
-    const lower_vec: Vec = @splat(rare_lower);
-    const upper_vec: Vec = @splat(rare_upper);
+    const first_lower_vec: Vec = @splat(first_lower);
+    const first_upper_vec: Vec = @splat(first_upper);
+    const last_lower_vec: Vec = @splat(last_lower);
+    const last_upper_vec: Vec = @splat(last_upper);
     const max_pos = haystack.len - needle.len;
+
     var pos: usize = 0;
 
-    // SIMD loop - search for both cases of the rare byte
-    while (pos + rare.offset + VECTOR_WIDTH <= haystack.len) {
-        const search_start = pos + rare.offset;
-        const chunk: Vec = haystack[search_start..][0..VECTOR_WIDTH].*;
+    // SIMD loop - check first AND last byte (both cases) simultaneously
+    while (pos + VECTOR_WIDTH <= max_pos + 1) {
+        const first_chunk: Vec = haystack[pos..][0..VECTOR_WIDTH].*;
+        const last_chunk: Vec = haystack[pos + offset ..][0..VECTOR_WIDTH].*;
 
-        // Check for both lowercase and uppercase matches
-        const cmp_lower: BoolVec = chunk == lower_vec;
-        const cmp_upper: BoolVec = chunk == upper_vec;
+        // Check first byte (both cases)
+        const first_eq_lower: BoolVec = first_chunk == first_lower_vec;
+        const first_eq_upper: BoolVec = first_chunk == first_upper_vec;
 
-        // Combine both matches with OR
+        // Check last byte (both cases)
+        const last_eq_lower: BoolVec = last_chunk == last_lower_vec;
+        const last_eq_upper: BoolVec = last_chunk == last_upper_vec;
+
+        // Convert to masks and combine: (first_lower OR first_upper) AND (last_lower OR last_upper)
         const MaskType = std.meta.Int(.unsigned, VECTOR_WIDTH);
-        const mask_lower: MaskType = @bitCast(cmp_lower);
-        const mask_upper: MaskType = @bitCast(cmp_upper);
-        var mask = mask_lower | mask_upper;
+        const first_lower_mask: MaskType = @bitCast(first_eq_lower);
+        const first_upper_mask: MaskType = @bitCast(first_eq_upper);
+        const last_lower_mask: MaskType = @bitCast(last_eq_lower);
+        const last_upper_mask: MaskType = @bitCast(last_eq_upper);
+        const first_mask = first_lower_mask | first_upper_mask;
+        const last_mask = last_lower_mask | last_upper_mask;
+        var mask = first_mask & last_mask;
 
-        while (mask != 0) {
-            const offset = @ctz(mask);
-            const candidate = pos + offset;
+        if (mask != 0) {
 
-            if (candidate <= max_pos) {
-                if (eqlIgnoreCase(haystack[candidate..][0..needle.len], needle)) {
-                    return candidate;
+            while (mask != 0) {
+                const bit_pos = @ctz(mask);
+                const candidate = pos + bit_pos;
+
+                if (candidate <= max_pos) {
+                    if (needle.len == 2 or
+                        eqlIgnoreCase(haystack[candidate + 1 ..][0 .. needle.len - 2], needle[1 .. needle.len - 1]))
+                    {
+                        return candidate;
+                    }
                 }
-            }
 
-            mask &= mask - 1;
+                mask &= mask - 1;
+            }
         }
         pos += VECTOR_WIDTH;
     }
 
     // Scalar fallback
     while (pos <= max_pos) : (pos += 1) {
-        const c = toLower(haystack[pos + rare.offset]);
-        if (c == rare_lower) {
-            if (eqlIgnoreCase(haystack[pos..][0..needle.len], needle)) {
+        const first_c = toLower(haystack[pos]);
+        const last_c = toLower(haystack[pos + offset]);
+        if (first_c == first_lower and last_c == last_lower) {
+            if (needle.len == 2 or eqlIgnoreCase(haystack[pos..][0..needle.len], needle)) {
                 return pos;
             }
         }
     }
-
     return null;
+}
+
+/// Find a substring case-insensitively using SIMD-accelerated two-byte fingerprinting
+/// Searches for both uppercase and lowercase versions of first AND last byte simultaneously
+pub fn findSubstringIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return null;
+
+    // Single byte optimization
+    if (needle.len == 1) {
+        const lower = toLower(needle[0]);
+        const upper = if (lower >= 'a' and lower <= 'z') lower - 32 else lower;
+        return findByteIgnoreCase(haystack, lower, upper);
+    }
+
+    // Two or more bytes: use two-byte fingerprinting
+    return findSubstringTwoByteIgnoreCase(haystack, needle);
 }
 
 /// Find a byte case-insensitively using SIMD
@@ -319,6 +366,36 @@ pub fn findSubstringFromIgnoreCase(haystack: []const u8, needle: []const u8, sta
         return start + pos;
     }
     return null;
+}
+
+/// Count newlines in a buffer using SIMD
+/// Much faster than a scalar loop for counting characters
+pub fn countNewlines(data: []const u8) usize {
+    if (data.len == 0) return 0;
+
+    const newline_vec: Vec = @splat('\n');
+    var count: usize = 0;
+    var pos: usize = 0;
+
+    // SIMD loop - count newlines in VECTOR_WIDTH bytes at a time
+    while (pos + VECTOR_WIDTH <= data.len) {
+        const chunk: Vec = data[pos..][0..VECTOR_WIDTH].*;
+        const matches: BoolVec = chunk == newline_vec;
+
+        // Convert bool vector to integer mask and popcount
+        const MaskType = std.meta.Int(.unsigned, VECTOR_WIDTH);
+        const mask: MaskType = @bitCast(matches);
+        count += @popCount(mask);
+
+        pos += VECTOR_WIDTH;
+    }
+
+    // Scalar tail
+    for (data[pos..]) |c| {
+        if (c == '\n') count += 1;
+    }
+
+    return count;
 }
 
 /// Find the next newline character using SIMD
@@ -461,7 +538,201 @@ test "findSubstringFrom edge cases" {
     try std.testing.expectEqual(@as(?usize, null), findSubstringFrom("hello", "", 10));
 }
 
+// =============================================================================
+// Two-Byte SIMD Fingerprinting Tests (Phase 1 optimization)
+// =============================================================================
 
+test "findSubstringTwoByte two char patterns" {
+    // Exact 2-char patterns (no middle verification needed)
+    try std.testing.expectEqual(@as(?usize, 0), findSubstring("ab", "ab"));
+    try std.testing.expectEqual(@as(?usize, 1), findSubstring("xab", "ab"));
+    try std.testing.expectEqual(@as(?usize, null), findSubstring("axb", "ab"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstring("abcd", "ab"));
+}
 
+test "findSubstringTwoByte same first and last byte" {
+    // Edge case: pattern starts and ends with same byte
+    try std.testing.expectEqual(@as(?usize, 0), findSubstring("aba", "aba"));
+    try std.testing.expectEqual(@as(?usize, 1), findSubstring("xabax", "aba"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstring("aaa", "aa"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstring("aaaa", "aaa"));
+}
+
+test "findSubstringTwoByte long patterns" {
+    // Patterns longer than SIMD width (16 bytes on ARM)
+    const long_pattern = "this is a very long pattern here";
+    const haystack = "prefix " ++ long_pattern ++ " suffix";
+    try std.testing.expectEqual(@as(?usize, 7), findSubstring(haystack, long_pattern));
+}
+
+test "findSubstringTwoByte at SIMD boundaries" {
+    // Pattern crosses SIMD chunk boundaries (16/32 bytes)
+    var haystack: [48]u8 = undefined;
+    @memset(&haystack, 'x');
+    // Place "needle" at position 14 (crosses 16-byte boundary)
+    @memcpy(haystack[14..20], "needle");
+    try std.testing.expectEqual(@as(?usize, 14), findSubstring(&haystack, "needle"));
+
+    // Place at position 15
+    @memset(&haystack, 'x');
+    @memcpy(haystack[15..21], "needle");
+    try std.testing.expectEqual(@as(?usize, 15), findSubstring(&haystack, "needle"));
+
+    // Place at position 31 (another boundary)
+    @memset(&haystack, 'x');
+    @memcpy(haystack[31..37], "needle");
+    try std.testing.expectEqual(@as(?usize, 31), findSubstring(&haystack, "needle"));
+}
+
+test "findSubstringTwoByte many false positives" {
+    // Test with many first+last byte matches but few full matches
+    // Pattern "aba" has 'a' at both ends
+    const haystack = "aa aa aa aba aa aa";
+    try std.testing.expectEqual(@as(?usize, 9), findSubstring(haystack, "aba"));
+
+    // More complex: "xyzx" where 'x' appears often
+    const haystack2 = "xxxx xyzx xxxx";
+    try std.testing.expectEqual(@as(?usize, 5), findSubstring(haystack2, "xyzx"));
+}
+
+test "findSubstringTwoByte scalar fallback" {
+    // Test patterns that exercise the scalar tail path
+    // Haystack just long enough to use SIMD once, then scalar
+    var haystack: [20]u8 = undefined;
+    @memset(&haystack, 'x');
+    // Put pattern in scalar tail region (after first 16 bytes)
+    @memcpy(haystack[17..19], "ab");
+    try std.testing.expectEqual(@as(?usize, 17), findSubstring(&haystack, "ab"));
+}
+
+// =============================================================================
+// Case-Insensitive Two-Byte Search Tests
+// =============================================================================
+
+test "findSubstringIgnoreCase basic" {
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("HELLO", "hello"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("hello", "HELLO"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("HeLLo", "hello"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("hElLo", "HELLO"));
+}
+
+test "findSubstringIgnoreCase mixed case pattern" {
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("hello", "HeLLo"));
+    try std.testing.expectEqual(@as(?usize, 6), findSubstringIgnoreCase("hello WORLD", "world"));
+    try std.testing.expectEqual(@as(?usize, 6), findSubstringIgnoreCase("hello world", "WORLD"));
+}
+
+test "findSubstringIgnoreCase non-alpha chars" {
+    // Non-alphabetic characters should match exactly
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("123", "123"));
+    try std.testing.expectEqual(@as(?usize, null), findSubstringIgnoreCase("123", "124"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("a1b", "A1B"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("A1B", "a1b"));
+}
+
+test "findSubstringIgnoreCase single char" {
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("A", "a"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("a", "A"));
+    try std.testing.expectEqual(@as(?usize, 2), findSubstringIgnoreCase("xxA", "a"));
+}
+
+test "findSubstringIgnoreCase two char patterns" {
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("AB", "ab"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("ab", "AB"));
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase("Ab", "aB"));
+}
+
+test "findSubstringFromIgnoreCase basic" {
+    const data = "Hello World, HELLO Universe";
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringFromIgnoreCase(data, "hello", 0));
+    try std.testing.expectEqual(@as(?usize, 13), findSubstringFromIgnoreCase(data, "hello", 1));
+    try std.testing.expectEqual(@as(?usize, null), findSubstringFromIgnoreCase(data, "hello", 20));
+}
+
+test "findSubstringIgnoreCase long pattern" {
+    const haystack = "THIS IS A VERY LONG STRING WITH PATTERN";
+    try std.testing.expectEqual(@as(?usize, 0), findSubstringIgnoreCase(haystack, "this is a very long"));
+    // "PATTERN" starts at index 32 in the haystack
+    try std.testing.expectEqual(@as(?usize, 32), findSubstringIgnoreCase(haystack, "pattern"));
+}
+
+// =============================================================================
+// SIMD Newline Counting Tests (Phase 4 optimization)
+// =============================================================================
+
+test "countNewlines empty" {
+    try std.testing.expectEqual(@as(usize, 0), countNewlines(""));
+}
+
+test "countNewlines no newlines" {
+    try std.testing.expectEqual(@as(usize, 0), countNewlines("hello world"));
+    try std.testing.expectEqual(@as(usize, 0), countNewlines("x"));
+    try std.testing.expectEqual(@as(usize, 0), countNewlines("abc def ghi jkl"));
+}
+
+test "countNewlines single newline" {
+    try std.testing.expectEqual(@as(usize, 1), countNewlines("\n"));
+    try std.testing.expectEqual(@as(usize, 1), countNewlines("hello\n"));
+    try std.testing.expectEqual(@as(usize, 1), countNewlines("hello\nworld"));
+    try std.testing.expectEqual(@as(usize, 1), countNewlines("\nworld"));
+}
+
+test "countNewlines multiple newlines" {
+    try std.testing.expectEqual(@as(usize, 3), countNewlines("a\nb\nc\n"));
+    try std.testing.expectEqual(@as(usize, 5), countNewlines("\n\n\n\n\n"));
+    try std.testing.expectEqual(@as(usize, 2), countNewlines("line1\nline2\n"));
+}
+
+test "countNewlines large buffer SIMD path" {
+    // Test with buffer larger than SIMD width to exercise SIMD path
+    var buf: [256]u8 = undefined;
+    @memset(&buf, 'x');
+    // Add 10 newlines at various positions
+    buf[15] = '\n';
+    buf[32] = '\n';
+    buf[47] = '\n';
+    buf[64] = '\n';
+    buf[79] = '\n';
+    buf[100] = '\n';
+    buf[120] = '\n';
+    buf[150] = '\n';
+    buf[200] = '\n';
+    buf[255] = '\n';
+    try std.testing.expectEqual(@as(usize, 10), countNewlines(&buf));
+}
+
+test "countNewlines all newlines" {
+    var buf: [64]u8 = undefined;
+    @memset(&buf, '\n');
+    try std.testing.expectEqual(@as(usize, 64), countNewlines(&buf));
+
+    var small_buf: [16]u8 = undefined;
+    @memset(&small_buf, '\n');
+    try std.testing.expectEqual(@as(usize, 16), countNewlines(&small_buf));
+}
+
+test "countNewlines scalar tail" {
+    // Test the scalar tail path (buffer not divisible by SIMD width)
+    try std.testing.expectEqual(@as(usize, 2), countNewlines("a\nb\n")); // 4 bytes (< 16)
+    try std.testing.expectEqual(@as(usize, 2), countNewlines("123456789012345\n1\n")); // 18 bytes
+
+    // 17 bytes - one SIMD chunk + 1 scalar byte
+    var buf17: [17]u8 = undefined;
+    @memset(&buf17, 'x');
+    buf17[0] = '\n';
+    buf17[16] = '\n';
+    try std.testing.expectEqual(@as(usize, 2), countNewlines(&buf17));
+}
+
+test "countNewlines at SIMD boundaries" {
+    // Test newlines exactly at SIMD boundaries (16, 32, 48...)
+    var buf: [64]u8 = undefined;
+    @memset(&buf, 'x');
+    buf[15] = '\n'; // Last byte of first chunk
+    buf[16] = '\n'; // First byte of second chunk
+    buf[31] = '\n'; // Last byte of second chunk
+    buf[32] = '\n'; // First byte of third chunk
+    try std.testing.expectEqual(@as(usize, 4), countNewlines(&buf));
+}
 
 

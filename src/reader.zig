@@ -377,9 +377,8 @@ pub const StreamingLineReader = struct {
 
                 // Count newlines incrementally from last_counted_pos to line_start
                 // This avoids O(n²) behavior when there are many matches
-                for (buffer_data[last_counted_pos..line_start]) |c| {
-                    if (c == '\n') current_line += 1;
-                }
+                // Use SIMD for faster counting
+                current_line += simd.countNewlines(buffer_data[last_counted_pos..line_start]);
                 last_counted_pos = line_start;
 
                 const line_content = buffer_data[line_start..line_end];
@@ -402,9 +401,8 @@ pub const StreamingLineReader = struct {
             const consumed_len = buffer_data.len - keep_bytes;
 
             // Count remaining newlines from last_counted_pos to end of consumed portion
-            for (buffer_data[last_counted_pos..consumed_len]) |c| {
-                if (c == '\n') current_line += 1;
-            }
+            // Use SIMD for faster counting
+            current_line += simd.countNewlines(buffer_data[last_counted_pos..consumed_len]);
             self.line_number = current_line - 1; // Convert back to 0-indexed for storage
 
             // Move to keep only the lookback bytes
@@ -460,9 +458,8 @@ pub const StreamingLineReader = struct {
                 }
 
                 // Count newlines incrementally from last_counted_pos to line_start
-                for (buffer_data[last_counted_pos..line_start]) |c| {
-                    if (c == '\n') current_line += 1;
-                }
+                // Use SIMD for faster counting
+                current_line += simd.countNewlines(buffer_data[last_counted_pos..line_start]);
                 last_counted_pos = line_start;
 
                 const line_content = buffer_data[line_start..line_end];
@@ -484,9 +481,8 @@ pub const StreamingLineReader = struct {
             const consumed_len = buffer_data.len - keep_bytes;
 
             // Count remaining newlines from last_counted_pos to end of consumed portion
-            for (buffer_data[last_counted_pos..consumed_len]) |c| {
-                if (c == '\n') current_line += 1;
-            }
+            // Use SIMD for faster counting
+            current_line += simd.countNewlines(buffer_data[last_counted_pos..consumed_len]);
             self.line_number = current_line - 1;
 
             // Move to keep only the lookback bytes

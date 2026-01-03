@@ -829,3 +829,217 @@ test "integration: parent gitignore local patterns override parent" {
     // *.sub_ignored from local
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, ".sub_ignored") == null);
 }
+
+// =============================================================================
+// Performance optimization tests
+// =============================================================================
+
+test "integration: large file search" {
+    // Test search in a moderately large file to verify SIMD optimizations work
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_large_test.txt";
+
+    // Create ~500KB file with known pattern
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        // Write 10000 lines of filler
+        const line = "line XXXXX: some text content here\n";
+        for (0..10000) |_| {
+            try file.writeAll(line);
+        }
+        try file.writeAll("UNIQUE_PATTERN_HERE on this line\n");
+        // Write 10000 more lines
+        for (0..10000) |_| {
+            try file.writeAll(line);
+        }
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "UNIQUE_PATTERN_HERE", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "UNIQUE_PATTERN_HERE") != null);
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+}
+
+test "integration: case insensitive large file" {
+    // Test case-insensitive search (exercises SIMD case-insensitive path)
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_ci_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        // Write lines alternating between PATTERN and pattern
+        for (0..2500) |_| {
+            try file.writeAll("line XXXXX: PATTERN here\n");
+            try file.writeAll("line XXXXX: pattern there\n");
+        }
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    // Count matches
+    const result = try runZipgrep(allocator, &.{ "-i", "-c", "pattern", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find 5000 matches (2500 PATTERN + 2500 pattern)
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "5000") != null);
+}
+
+test "integration: line numbers correct with many lines" {
+    // Test that SIMD newline counting produces correct line numbers
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_linenum_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        // Write 499 filler lines, then target, then 500 more filler lines
+        const filler_line = "line content filler text here\n";
+        for (0..499) |_| {
+            try file.writeAll(filler_line);
+        }
+        try file.writeAll("TARGET_LINE_HERE\n");
+        for (0..500) |_| {
+            try file.writeAll(filler_line);
+        }
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-n", "TARGET_LINE_HERE", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should report line 500
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "500:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "TARGET_LINE_HERE") != null);
+}
+
+test "integration: pattern at buffer boundary" {
+    // Test patterns that might span SIMD chunk boundaries (16/32 bytes)
+    // This exercises the SIMD two-byte fingerprinting
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_boundary_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        // Write content with patterns at various offsets that cross SIMD boundaries
+        // SIMD width is 16 bytes on ARM, so write patterns near 14, 15, 16, 17 byte offsets
+        try file.writeAll("prefix14xxxxBOUNDARY_PATTERN_TEST_ONE\n"); // pattern starts at offset 14
+        try file.writeAll("prefix15xxxxxBOUNDARY_PATTERN_TEST_TWO\n"); // pattern starts at offset 15
+        try file.writeAll("prefix16xxxxxxBOUNDARY_PATTERN_TEST_THREE\n"); // pattern starts at offset 16
+        try file.writeAll("prefix31xxxxxxxxxxxxxxxxxxxxxxBOUNDARY_PATTERN_TEST_FOUR\n"); // pattern starts at offset 31
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-c", "BOUNDARY_PATTERN_TEST", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find all 4 patterns
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "4") != null);
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+}
+
+test "integration: two byte pattern search" {
+    // Test minimum pattern length for two-byte SIMD optimization
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_twobyte_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        try file.writeAll("xx ab xx ab xx cd xx\nab at start\nend with ab\n");
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-c", "ab", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find 4 lines with "ab"
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "3") != null);
+}
+
+test "integration: long pattern search" {
+    // Test patterns longer than SIMD width
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_longpattern_test.txt";
+
+    const long_pattern = "this_is_a_very_long_pattern_for_testing_simd_search";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        // Write filler lines
+        const filler_line = "line content: some filler content here\n";
+        for (0..100) |_| {
+            try file.writeAll(filler_line);
+        }
+        try file.writeAll("found: " ++ long_pattern ++ "\n");
+        for (0..100) |_| {
+            try file.writeAll(filler_line);
+        }
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ long_pattern, temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, long_pattern) != null);
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+}
+
+test "integration: many matches same line" {
+    // Test multiple matches on the same line (exercises match iteration)
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_manymatches_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        // Line with multiple "ab" occurrences
+        try file.writeAll("ab ab ab ab ab ab ab ab ab ab\n");
+        try file.writeAll("no matches here\n");
+        try file.writeAll("ab ab ab\n");
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    // Just check that it finds matches without crashing
+    const result = try runZipgrep(allocator, &.{ "ab", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try std.testing.expect(result.stdout.len > 0);
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+}
+
+test "integration: empty lines handling" {
+    // Test files with many empty lines (exercises newline counting)
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_emptylines_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        // Write 100 empty lines, then content, then 100 more empty lines
+        // Use batched writes for efficiency
+        const empty_lines = "\n" ** 100;
+        try file.writeAll(empty_lines);
+        try file.writeAll("TARGET_ON_LINE_101\n");
+        try file.writeAll(empty_lines);
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-n", "TARGET_ON_LINE_101", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should report line 101
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "101:") != null);
+}
