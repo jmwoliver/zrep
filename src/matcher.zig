@@ -1,6 +1,8 @@
 const std = @import("std");
 const regex = @import("regex.zig");
 const simd = @import("simd.zig");
+const literal = @import("literal.zig");
+const aho_corasick = @import("aho_corasick.zig");
 
 pub const MatchResult = struct {
     start: usize,
@@ -16,7 +18,62 @@ pub const Matcher = struct {
     regex_engine: ?regex.Regex,
     lower_pattern: ?[]u8,
 
+    // Multi-pattern support for pure-literal alternation (Aho-Corasick)
+    ac_automaton: ?aho_corasick.AhoCorasick,
+    alternation_info: ?literal.AlternationInfo,
+    is_multi_literal: bool,
+    lower_alternation_patterns: ?[][]u8, // Lowercased patterns for case-insensitive AC
+
     pub fn init(allocator: std.mem.Allocator, pattern: []const u8, ignore_case: bool, word_boundary: bool) !Matcher {
+        // First, try to detect pure-literal alternation for AC optimization
+        if (try literal.extractAlternationLiterals(allocator, pattern)) |alt_info| {
+            // Pure-literal alternation detected - use Aho-Corasick
+            // For case-insensitive, build AC from lowercased patterns
+            var patterns_to_use: []const []const u8 = alt_info.literals;
+            var lower_patterns: ?[][]u8 = null;
+
+            if (ignore_case) {
+                lower_patterns = try allocator.alloc([]u8, alt_info.literals.len);
+                errdefer {
+                    if (lower_patterns) |lp| {
+                        for (lp) |p| allocator.free(p);
+                        allocator.free(lp);
+                    }
+                }
+                for (alt_info.literals, 0..) |lit, i| {
+                    lower_patterns.?[i] = try allocator.alloc(u8, lit.len);
+                    for (lit, 0..) |c, j| {
+                        lower_patterns.?[i][j] = std.ascii.toLower(c);
+                    }
+                }
+                // Use the lowercased patterns slice for AC
+                // Need to cast to []const []const u8
+                patterns_to_use = @as([]const []const u8, @ptrCast(lower_patterns.?));
+            }
+
+            var ac = try aho_corasick.AhoCorasick.compile(allocator, patterns_to_use);
+            errdefer ac.deinit();
+
+            // Free the lower_patterns array (but not the strings - AC doesn't own them either)
+            // Actually AC doesn't copy the strings, so we need to keep them
+            // Store them in a separate field
+
+            return .{
+                .allocator = allocator,
+                .pattern = pattern,
+                .ignore_case = ignore_case,
+                .word_boundary = word_boundary,
+                .is_literal = false, // Not a single literal
+                .regex_engine = null, // Don't need regex for pure-literal alternation
+                .lower_pattern = null,
+                .ac_automaton = ac,
+                .alternation_info = alt_info,
+                .is_multi_literal = true,
+                .lower_alternation_patterns = lower_patterns,
+            };
+        }
+
+        // Fall back to existing behavior for single patterns and complex regex
         const is_literal = !containsRegexMetaChars(pattern);
 
         var lower_pattern: ?[]u8 = null;
@@ -40,6 +97,10 @@ pub const Matcher = struct {
             .is_literal = is_literal,
             .regex_engine = regex_engine,
             .lower_pattern = lower_pattern,
+            .ac_automaton = null,
+            .alternation_info = null,
+            .is_multi_literal = false,
+            .lower_alternation_patterns = null,
         };
     }
 
@@ -48,6 +109,20 @@ pub const Matcher = struct {
             re.deinit();
         }
         if (self.lower_pattern) |lp| {
+            self.allocator.free(lp);
+        }
+        // Free Aho-Corasick resources
+        if (self.ac_automaton) |*ac| {
+            ac.deinit();
+        }
+        if (self.alternation_info) |*info| {
+            info.deinit();
+        }
+        // Free lowercased alternation patterns (for case-insensitive)
+        if (self.lower_alternation_patterns) |lp| {
+            for (lp) |p| {
+                self.allocator.free(p);
+            }
             self.allocator.free(lp);
         }
     }
@@ -60,6 +135,11 @@ pub const Matcher = struct {
     /// Find the first match starting from a given offset
     fn findFirstFrom(self: *const Matcher, haystack: []const u8, start_offset: usize) ?MatchResult {
         if (start_offset >= haystack.len) return null;
+
+        // Use Aho-Corasick for multi-literal alternation patterns
+        if (self.is_multi_literal) {
+            return self.findFirstMultiLiteral(haystack, start_offset);
+        }
 
         const result = if (self.is_literal)
             self.findLiteralInFrom(haystack, start_offset)
@@ -89,6 +169,104 @@ pub const Matcher = struct {
         }
 
         return null;
+    }
+
+    /// Find first match using Aho-Corasick for multi-literal alternation
+    fn findFirstMultiLiteral(self: *const Matcher, haystack: []const u8, start_offset: usize) ?MatchResult {
+        const ac = &(self.ac_automaton orelse return null);
+
+        // For case-insensitive, we need to lowercase the haystack
+        // This is done on-the-fly to avoid allocation
+        if (self.ignore_case) {
+            return self.findFirstMultiLiteralIgnoreCase(haystack, start_offset);
+        }
+
+        if (ac.findFirstFrom(haystack, start_offset)) |match| {
+            const result = MatchResult{
+                .start = match.start,
+                .end = match.end,
+            };
+
+            // Word boundary check
+            if (self.word_boundary) {
+                if (!isWordBoundaryMatch(haystack, result.start, result.end)) {
+                    // Not a word boundary match, try again from after match start
+                    return self.findFirstMultiLiteral(haystack, result.start + 1);
+                }
+            }
+
+            return result;
+        }
+        return null;
+    }
+
+    /// Case-insensitive multi-literal search
+    /// Uses a stack buffer to lowercase chunks of the haystack
+    fn findFirstMultiLiteralIgnoreCase(self: *const Matcher, haystack: []const u8, start_offset: usize) ?MatchResult {
+        const ac = &(self.ac_automaton orelse return null);
+        const info = self.alternation_info orelse return null;
+
+        // For small haystacks, lowercase the entire thing
+        // For large haystacks, search each pattern individually using SIMD
+        if (haystack.len <= 4096) {
+            // Use stack buffer for lowercasing
+            var lower_buf: [4096]u8 = undefined;
+            const len = @min(haystack.len, 4096);
+            for (haystack[0..len], 0..) |c, i| {
+                lower_buf[i] = std.ascii.toLower(c);
+            }
+
+            if (ac.findFirstFrom(lower_buf[0..len], start_offset)) |match| {
+                const result = MatchResult{
+                    .start = match.start,
+                    .end = match.end,
+                };
+
+                if (self.word_boundary) {
+                    if (!isWordBoundaryMatch(haystack, result.start, result.end)) {
+                        return self.findFirstMultiLiteralIgnoreCase(haystack, result.start + 1);
+                    }
+                }
+
+                return result;
+            }
+            return null;
+        }
+
+        // For large haystacks, fall back to parallel SIMD search for each pattern
+        var earliest_match: ?MatchResult = null;
+        var earliest_pos: usize = std.math.maxInt(usize);
+
+        for (info.literals) |lit| {
+            if (simd.findSubstringFromIgnoreCase(haystack, lit, start_offset)) |pos| {
+                if (pos < earliest_pos) {
+                    earliest_pos = pos;
+                    earliest_match = MatchResult{
+                        .start = pos,
+                        .end = pos + lit.len,
+                    };
+                }
+            }
+        }
+
+        if (earliest_match) |result| {
+            if (self.word_boundary) {
+                if (!isWordBoundaryMatch(haystack, result.start, result.end)) {
+                    return self.findFirstMultiLiteralIgnoreCase(haystack, result.start + 1);
+                }
+            }
+            return result;
+        }
+
+        return null;
+    }
+
+    /// Get the maximum pattern length (useful for buffer overlap handling)
+    pub fn getMaxPatternLen(self: *const Matcher) usize {
+        if (self.ac_automaton) |*ac| {
+            return ac.getMaxPatternLen();
+        }
+        return self.pattern.len;
     }
 
     /// Check if a match at the given position satisfies word boundary constraints
@@ -556,4 +734,298 @@ test "word boundary with mixed ASCII and UTF-8" {
     // This prevents false matches when ASCII appears inside multibyte sequences
     try std.testing.expect(!m.matches("日foo本")); // Japanese: should NOT match
     try std.testing.expect(m.matches("日 foo 本")); // With spaces: should match
+}
+
+// =============================================================================
+// Multi-literal Alternation Tests (Aho-Corasick)
+// =============================================================================
+
+test "multi-literal alternation basic" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "foo|bar|baz", false, false);
+    defer m.deinit();
+
+    try std.testing.expect(m.is_multi_literal);
+    try std.testing.expect(m.ac_automaton != null);
+    try std.testing.expect(m.matches("foo"));
+    try std.testing.expect(m.matches("bar"));
+    try std.testing.expect(m.matches("baz"));
+    try std.testing.expect(m.matches("hello foo world"));
+    try std.testing.expect(m.matches("hello bar world"));
+    try std.testing.expect(!m.matches("hello world"));
+}
+
+test "multi-literal alternation benchmark pattern" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "ERR_SYS|PME_TURN_OFF|LINK_REQ_RST|CFG_BME_EVT", false, false);
+    defer m.deinit();
+
+    try std.testing.expect(m.is_multi_literal);
+    try std.testing.expect(m.matches("test ERR_SYS here"));
+    try std.testing.expect(m.matches("test PME_TURN_OFF here"));
+    try std.testing.expect(m.matches("test LINK_REQ_RST here"));
+    try std.testing.expect(m.matches("test CFG_BME_EVT here"));
+    try std.testing.expect(!m.matches("test NO_MATCH here"));
+}
+
+test "multi-literal alternation findFirst position" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "foo|bar", false, false);
+    defer m.deinit();
+
+    const result1 = m.findFirst("hello foo world");
+    try std.testing.expect(result1 != null);
+    try std.testing.expectEqual(@as(usize, 6), result1.?.start);
+    try std.testing.expectEqual(@as(usize, 9), result1.?.end);
+
+    const result2 = m.findFirst("hello bar world");
+    try std.testing.expect(result2 != null);
+    try std.testing.expectEqual(@as(usize, 6), result2.?.start);
+    try std.testing.expectEqual(@as(usize, 9), result2.?.end);
+}
+
+test "multi-literal alternation finds earliest match" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "bar|foo", false, false);
+    defer m.deinit();
+
+    // "foo" appears first in the string, should be found first regardless of pattern order
+    const result = m.findFirst("hello foo bar");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(usize, 6), result.?.start);
+}
+
+test "multi-literal alternation with word boundary" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "foo|bar", false, true);
+    defer m.deinit();
+
+    try std.testing.expect(m.matches("foo bar"));
+    try std.testing.expect(m.matches("hello foo"));
+    try std.testing.expect(!m.matches("foobar")); // "foo" not at word boundary
+    try std.testing.expect(!m.matches("barfoo")); // "bar" not at word boundary
+}
+
+test "multi-literal max pattern length" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "a|abc|abcdefghij", false, false);
+    defer m.deinit();
+
+    try std.testing.expectEqual(@as(usize, 10), m.getMaxPatternLen());
+}
+
+test "multi-literal case insensitive small haystack" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "FOO|BAR", true, false);
+    defer m.deinit();
+
+    try std.testing.expect(m.matches("hello foo world"));
+    try std.testing.expect(m.matches("hello FOO world"));
+    try std.testing.expect(m.matches("hello FoO world"));
+    try std.testing.expect(m.matches("hello bar world"));
+    try std.testing.expect(m.matches("hello BAR world"));
+}
+
+// =============================================================================
+// Additional Multi-literal Tests
+// =============================================================================
+
+test "multi-literal alternation position tracking" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "ERR|WARN|INFO", false, false);
+    defer m.deinit();
+
+    // Test findFirst returns correct positions
+    const result1 = m.findFirst("some ERR message");
+    try std.testing.expect(result1 != null);
+    try std.testing.expectEqual(@as(usize, 5), result1.?.start);
+    try std.testing.expectEqual(@as(usize, 8), result1.?.end);
+
+    const result2 = m.findFirst("some WARN message");
+    try std.testing.expect(result2 != null);
+    try std.testing.expectEqual(@as(usize, 5), result2.?.start);
+    try std.testing.expectEqual(@as(usize, 9), result2.?.end);
+
+    const result3 = m.findFirst("some INFO message");
+    try std.testing.expect(result3 != null);
+    try std.testing.expectEqual(@as(usize, 5), result3.?.start);
+    try std.testing.expectEqual(@as(usize, 9), result3.?.end);
+}
+
+test "multi-literal alternation finds earliest match regardless of pattern order" {
+    const allocator = std.testing.allocator;
+
+    // Pattern order shouldn't affect which match is found first
+    var m = try Matcher.init(allocator, "WARN|ERR|INFO", false, false);
+    defer m.deinit();
+
+    // ERR appears first in the string
+    const result = m.findFirst("test ERR then WARN then INFO");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(usize, 5), result.?.start);
+    try std.testing.expectEqual(@as(usize, 8), result.?.end);
+}
+
+test "multi-literal with word boundary skips embedded matches" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "ERR|WARN", false, true);
+    defer m.deinit();
+
+    // "ERROR" contains "ERR" but not at word boundary
+    try std.testing.expect(!m.matches("ERROR"));
+    try std.testing.expect(!m.matches("WARNING"));
+
+    // But standalone should match
+    try std.testing.expect(m.matches("ERR"));
+    try std.testing.expect(m.matches("WARN"));
+    try std.testing.expect(m.matches("test ERR here"));
+    try std.testing.expect(m.matches("test WARN here"));
+}
+
+test "multi-literal case insensitive with word boundary" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "foo|bar", true, true);
+    defer m.deinit();
+
+    // Should match case-insensitive at word boundaries
+    try std.testing.expect(m.matches("FOO bar"));
+    try std.testing.expect(m.matches("foo BAR"));
+    try std.testing.expect(m.matches("test FOO test"));
+    try std.testing.expect(m.matches("test Bar test"));
+
+    // Should NOT match when not at word boundary
+    try std.testing.expect(!m.matches("FOOBAR"));
+    try std.testing.expect(!m.matches("testFOOtest"));
+}
+
+test "multi-literal no match returns null" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "xyz|abc|def", false, false);
+    defer m.deinit();
+
+    try std.testing.expect(m.findFirst("hello world") == null);
+    try std.testing.expect(!m.matches("hello world"));
+}
+
+test "multi-literal empty haystack" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "foo|bar", false, false);
+    defer m.deinit();
+
+    try std.testing.expect(m.findFirst("") == null);
+    try std.testing.expect(!m.matches(""));
+}
+
+test "multi-literal single character alternatives" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "a|b|c", false, false);
+    defer m.deinit();
+
+    try std.testing.expect(m.matches("a"));
+    try std.testing.expect(m.matches("b"));
+    try std.testing.expect(m.matches("c"));
+    try std.testing.expect(m.matches("xyz a xyz"));
+    try std.testing.expect(!m.matches("xyz"));
+}
+
+test "multi-literal mixed length patterns" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "a|abc|abcdef", false, false);
+    defer m.deinit();
+
+    // Should find match even with mixed lengths
+    try std.testing.expect(m.matches("abcdef"));
+    try std.testing.expect(m.matches("abc"));
+    try std.testing.expect(m.matches("a"));
+}
+
+test "multi-literal special characters preserved" {
+    const allocator = std.testing.allocator;
+
+    // Underscores and numbers are literal, not regex
+    var m = try Matcher.init(allocator, "ERR_SYS|PME_TURN_OFF|LINK_REQ_RST|CFG_BME_EVT", false, false);
+    defer m.deinit();
+
+    try std.testing.expect(m.is_multi_literal);
+    try std.testing.expect(m.matches("test ERR_SYS here"));
+    try std.testing.expect(m.matches("test PME_TURN_OFF here"));
+    try std.testing.expect(m.matches("test LINK_REQ_RST here"));
+    try std.testing.expect(m.matches("test CFG_BME_EVT here"));
+    try std.testing.expect(!m.matches("test ERR_OTHER here"));
+}
+
+test "multi-literal vs regex fallback" {
+    const allocator = std.testing.allocator;
+
+    // Pure literals should use AC
+    {
+        var m = try Matcher.init(allocator, "foo|bar", false, false);
+        defer m.deinit();
+        try std.testing.expect(m.is_multi_literal);
+        try std.testing.expect(m.ac_automaton != null);
+        try std.testing.expect(m.regex_engine == null);
+    }
+
+    // Pattern with regex metachar should NOT use AC
+    {
+        var m = try Matcher.init(allocator, "foo.*|bar", false, false);
+        defer m.deinit();
+        try std.testing.expect(!m.is_multi_literal);
+        try std.testing.expect(m.ac_automaton == null);
+        try std.testing.expect(m.regex_engine != null);
+    }
+}
+
+test "multi-literal case insensitive position" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "FOO|BAR", true, false);
+    defer m.deinit();
+
+    // Check positions are correct for case-insensitive matches
+    const result = m.findFirst("test foo here");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(usize, 5), result.?.start);
+    try std.testing.expectEqual(@as(usize, 8), result.?.end);
+}
+
+test "multi-literal overlapping patterns in haystack" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "ab|bc", false, false);
+    defer m.deinit();
+
+    // "abc" contains both "ab" and "bc" overlapping
+    const result1 = m.findFirst("xabcx");
+    try std.testing.expect(result1 != null);
+    try std.testing.expectEqual(@as(usize, 1), result1.?.start);
+}
+
+test "multi-literal consecutive matches" {
+    const allocator = std.testing.allocator;
+
+    var m = try Matcher.init(allocator, "aa|bb", false, false);
+    defer m.deinit();
+
+    // Test that we can find multiple consecutive matches
+    try std.testing.expect(m.matches("aabb"));
+    try std.testing.expect(m.matches("bbaa"));
+
+    const result = m.findFirst("aabb");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(usize, 0), result.?.start);
 }

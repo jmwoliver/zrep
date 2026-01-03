@@ -476,3 +476,221 @@ test "suffix with quantifier prefix" {
     try std.testing.expectEqualStrings("CONFIG", info.?.literal);
     try std.testing.expectEqual(LiteralInfo.Position.suffix, info.?.position);
 }
+
+// =============================================================================
+// Alternation Literal Extraction for Aho-Corasick
+// =============================================================================
+
+/// Result of alternation analysis - contains all extracted literals
+pub const AlternationInfo = struct {
+    /// The extracted literal alternatives (each is a pure literal string)
+    /// Memory is owned by this struct
+    literals: []const []const u8,
+    /// True if all alternatives contain only ASCII characters
+    ascii_only: bool,
+    /// Allocator used for memory management
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *AlternationInfo) void {
+        for (self.literals) |lit| {
+            self.allocator.free(lit);
+        }
+        self.allocator.free(self.literals);
+    }
+};
+
+/// Analyze a pattern to detect pure-literal alternation.
+/// Returns AlternationInfo if pattern is exactly "A|B|C|..." where all A,B,C are pure literals.
+/// Returns null if:
+/// - Pattern contains nested groups with alternation: (a|b)|c
+/// - Any alternative contains regex metacharacters: a.*|b
+/// - Pattern is empty or has no alternation
+/// - Any alternative is empty
+///
+/// This is conservative: it only extracts alternatives that are guaranteed to be
+/// pure literals with no special regex meaning.
+///
+/// Caller must call deinit() on the returned AlternationInfo to free memory.
+pub fn extractAlternationLiterals(allocator: std.mem.Allocator, pattern: []const u8) !?AlternationInfo {
+    if (pattern.len == 0) return null;
+
+    // Quick check: must contain at least one '|' at top level
+    var has_alternation = false;
+    var paren_depth: usize = 0;
+    var bracket_depth: usize = 0;
+    for (pattern) |c| {
+        switch (c) {
+            '(' => paren_depth += 1,
+            ')' => if (paren_depth > 0) {
+                paren_depth -= 1;
+            },
+            '[' => bracket_depth += 1,
+            ']' => if (bracket_depth > 0) {
+                bracket_depth -= 1;
+            },
+            '|' => if (paren_depth == 0 and bracket_depth == 0) {
+                has_alternation = true;
+                break;
+            },
+            else => {},
+        }
+    }
+    if (!has_alternation) return null;
+
+    // Parse and validate each alternative
+    var literals = std.ArrayListUnmanaged([]const u8){};
+    errdefer {
+        for (literals.items) |lit| allocator.free(lit);
+        literals.deinit(allocator);
+    }
+
+    var ascii_only = true;
+    var start: usize = 0;
+    paren_depth = 0;
+    bracket_depth = 0;
+
+    for (pattern, 0..) |c, i| {
+        switch (c) {
+            '(' => paren_depth += 1,
+            ')' => if (paren_depth > 0) {
+                paren_depth -= 1;
+            },
+            '[' => bracket_depth += 1,
+            ']' => if (bracket_depth > 0) {
+                bracket_depth -= 1;
+            },
+            '|' => {
+                if (paren_depth == 0 and bracket_depth == 0) {
+                    const alt = pattern[start..i];
+                    if (alt.len == 0 or !isPureLiteral(alt)) {
+                        // Not a pure literal - abort
+                        for (literals.items) |lit| allocator.free(lit);
+                        literals.deinit(allocator);
+                        return null;
+                    }
+                    const owned = try allocator.dupe(u8, alt);
+                    try literals.append(allocator, owned);
+                    for (alt) |ch| {
+                        if (ch >= 0x80) ascii_only = false;
+                    }
+                    start = i + 1;
+                }
+            },
+            else => {},
+        }
+    }
+
+    // Handle final alternative
+    const last_alt = pattern[start..];
+    if (last_alt.len == 0 or !isPureLiteral(last_alt)) {
+        for (literals.items) |lit| allocator.free(lit);
+        literals.deinit(allocator);
+        return null;
+    }
+    const owned_last = try allocator.dupe(u8, last_alt);
+    try literals.append(allocator, owned_last);
+    for (last_alt) |ch| {
+        if (ch >= 0x80) ascii_only = false;
+    }
+
+    if (literals.items.len < 2) {
+        // Need at least 2 alternatives
+        for (literals.items) |lit| allocator.free(lit);
+        literals.deinit(allocator);
+        return null;
+    }
+
+    return AlternationInfo{
+        .literals = try literals.toOwnedSlice(allocator),
+        .ascii_only = ascii_only,
+        .allocator = allocator,
+    };
+}
+
+/// Check if a string is a pure literal (no regex metacharacters)
+fn isPureLiteral(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (isMetachar(c)) return false;
+    }
+    return true;
+}
+
+// =============================================================================
+// Alternation Tests
+// =============================================================================
+
+test "extractAlternationLiterals pure literals" {
+    const allocator = std.testing.allocator;
+    var info = (try extractAlternationLiterals(allocator, "foo|bar|baz")).?;
+    defer info.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), info.literals.len);
+    try std.testing.expectEqualStrings("foo", info.literals[0]);
+    try std.testing.expectEqualStrings("bar", info.literals[1]);
+    try std.testing.expectEqualStrings("baz", info.literals[2]);
+    try std.testing.expect(info.ascii_only);
+}
+
+test "extractAlternationLiterals benchmark pattern" {
+    const allocator = std.testing.allocator;
+    var info = (try extractAlternationLiterals(allocator, "ERR_SYS|PME_TURN_OFF|LINK_REQ_RST|CFG_BME_EVT")).?;
+    defer info.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), info.literals.len);
+    try std.testing.expectEqualStrings("ERR_SYS", info.literals[0]);
+    try std.testing.expectEqualStrings("PME_TURN_OFF", info.literals[1]);
+    try std.testing.expectEqualStrings("LINK_REQ_RST", info.literals[2]);
+    try std.testing.expectEqualStrings("CFG_BME_EVT", info.literals[3]);
+}
+
+test "extractAlternationLiterals with regex returns null" {
+    const allocator = std.testing.allocator;
+    const info = try extractAlternationLiterals(allocator, "foo.*|bar");
+    try std.testing.expect(info == null);
+}
+
+test "extractAlternationLiterals with character class returns null" {
+    const allocator = std.testing.allocator;
+    const info = try extractAlternationLiterals(allocator, "[a-z]+|bar");
+    try std.testing.expect(info == null);
+}
+
+test "extractAlternationLiterals single pattern returns null" {
+    const allocator = std.testing.allocator;
+    const info = try extractAlternationLiterals(allocator, "foo");
+    try std.testing.expect(info == null);
+}
+
+test "extractAlternationLiterals empty alternative returns null" {
+    const allocator = std.testing.allocator;
+    const info = try extractAlternationLiterals(allocator, "foo||bar");
+    try std.testing.expect(info == null);
+}
+
+test "extractAlternationLiterals nested group returns null" {
+    const allocator = std.testing.allocator;
+    // Nested alternation in group - still pure literals at top level
+    const info = try extractAlternationLiterals(allocator, "(foo|bar)|baz");
+    // This should return null because the parentheses are regex metacharacters
+    try std.testing.expect(info == null);
+}
+
+test "extractAlternationLiterals two patterns" {
+    const allocator = std.testing.allocator;
+    var info = (try extractAlternationLiterals(allocator, "foo|bar")).?;
+    defer info.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), info.literals.len);
+    try std.testing.expectEqualStrings("foo", info.literals[0]);
+    try std.testing.expectEqualStrings("bar", info.literals[1]);
+}
+
+test "extractAlternationLiterals non-ascii" {
+    const allocator = std.testing.allocator;
+    var info = (try extractAlternationLiterals(allocator, "foo|日本語")).?;
+    defer info.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), info.literals.len);
+    try std.testing.expect(!info.ascii_only);
+}

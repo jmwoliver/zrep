@@ -1043,3 +1043,333 @@ test "integration: empty lines handling" {
     // Should report line 101
     try std.testing.expect(std.mem.indexOf(u8, result.stdout, "101:") != null);
 }
+
+// =============================================================================
+// Multi-literal Alternation Integration Tests (Aho-Corasick)
+// =============================================================================
+
+test "integration: alternation basic" {
+    // Test basic multi-literal alternation pattern (uses Aho-Corasick)
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        try file.writeAll("line with ERR_SYS error\n");
+        try file.writeAll("line with no match\n");
+        try file.writeAll("line with PME_TURN_OFF event\n");
+        try file.writeAll("another line without match\n");
+        try file.writeAll("line with LINK_REQ_RST status\n");
+        try file.writeAll("final line with CFG_BME_EVT config\n");
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "ERR_SYS|PME_TURN_OFF|LINK_REQ_RST|CFG_BME_EVT", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find all 4 matching lines
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "ERR_SYS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "PME_TURN_OFF") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "LINK_REQ_RST") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "CFG_BME_EVT") != null);
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+}
+
+test "integration: alternation count mode" {
+    // Test alternation with count mode
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_count_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        try file.writeAll("ERROR here\n");
+        try file.writeAll("no match\n");
+        try file.writeAll("WARNING here\n");
+        try file.writeAll("no match\n");
+        try file.writeAll("INFO here\n");
+        try file.writeAll("no match\n");
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-c", "ERROR|WARNING|INFO", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should count 3 matching lines
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "3") != null);
+}
+
+test "integration: alternation case insensitive" {
+    // Test alternation with case-insensitive flag
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_casei_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        try file.writeAll("line with FOO uppercase\n");
+        try file.writeAll("line with foo lowercase\n");
+        try file.writeAll("line with Bar mixedcase\n");
+        try file.writeAll("line with BAZ uppercase\n");
+        try file.writeAll("no match here\n");
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-i", "foo|bar|baz", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find all 4 matching lines (case insensitive)
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        if (line.len > 0) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), count);
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+}
+
+test "integration: alternation word boundary" {
+    // Test alternation with word boundary flag
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_word_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        try file.writeAll("line with ERR standalone\n");
+        try file.writeAll("line with ERROR embedded\n"); // ERR is NOT word-bounded here
+        try file.writeAll("line with WARN standalone\n");
+        try file.writeAll("line with WARNING embedded\n"); // WARN is NOT word-bounded here
+        try file.writeAll("no match here\n");
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-w", "ERR|WARN", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should only find 2 lines (standalone ERR and WARN)
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        if (line.len > 0) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+test "integration: alternation line numbers" {
+    // Test alternation with line number display
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_lineno_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        try file.writeAll("no match\n"); // line 1
+        try file.writeAll("AAA here\n"); // line 2
+        try file.writeAll("no match\n"); // line 3
+        try file.writeAll("BBB here\n"); // line 4
+        try file.writeAll("no match\n"); // line 5
+        try file.writeAll("CCC here\n"); // line 6
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-n", "AAA|BBB|CCC", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should show correct line numbers
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "2:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "4:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "6:") != null);
+}
+
+test "integration: alternation no match" {
+    // Test alternation that finds no matches
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_nomatch_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        try file.writeAll("line one\n");
+        try file.writeAll("line two\n");
+        try file.writeAll("line three\n");
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "XYZ|ABC|DEF", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // No output when no matches
+    try std.testing.expectEqual(@as(usize, 0), result.stdout.len);
+}
+
+test "integration: alternation recursive" {
+    // Test alternation with recursive directory search
+    const allocator = std.testing.allocator;
+    const temp_dir = "/tmp/zipgrep_alternation_recursive";
+
+    // Create directory structure
+    std.fs.cwd().deleteTree(temp_dir) catch {};
+    try std.fs.cwd().makePath(temp_dir ++ "/subdir");
+
+    {
+        const file1 = try std.fs.cwd().createFile(temp_dir ++ "/file1.txt", .{});
+        defer file1.close();
+        try file1.writeAll("AAA in file1\n");
+
+        const file2 = try std.fs.cwd().createFile(temp_dir ++ "/subdir/file2.txt", .{});
+        defer file2.close();
+        try file2.writeAll("BBB in file2\n");
+    }
+    defer std.fs.cwd().deleteTree(temp_dir) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "AAA|BBB", temp_dir });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find in both files
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "file1.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "file2.txt") != null);
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+}
+
+test "integration: alternation multiple matches per line" {
+    // Test alternation when multiple alternatives match on the same line
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_multiline_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        // Line with multiple matching alternatives
+        try file.writeAll("ERR_SYS and PME_TURN_OFF on same line\n");
+        try file.writeAll("no match\n");
+        try file.writeAll("LINK_REQ_RST only\n");
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-c", "ERR_SYS|PME_TURN_OFF|LINK_REQ_RST", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should count 2 matching lines (line 1 and line 3)
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "2") != null);
+}
+
+test "integration: alternation combined flags" {
+    // Test alternation with combined flags (-i -w -n)
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_combined_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        try file.writeAll("line one\n"); // line 1
+        try file.writeAll("FOO standalone\n"); // line 2 - matches
+        try file.writeAll("FOOBAR embedded\n"); // line 3 - no match (word boundary)
+        try file.writeAll("bar standalone\n"); // line 4 - matches (case insensitive)
+        try file.writeAll("barbaz embedded\n"); // line 5 - no match
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-i", "-w", "-n", "foo|bar", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should show lines 2 and 4
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "2:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "4:") != null);
+    // Should NOT contain lines 3 or 5
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "3:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "5:") == null);
+}
+
+test "integration: alternation large file" {
+    // Test alternation on a larger file (stress test)
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_large_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+
+        // Write many lines, with matches scattered throughout
+        var i: usize = 0;
+        while (i < 10000) : (i += 1) {
+            if (i == 1000) {
+                try file.writeAll("ERROR_CODE_ALPHA found\n");
+            } else if (i == 5000) {
+                try file.writeAll("ERROR_CODE_BETA found\n");
+            } else if (i == 9000) {
+                try file.writeAll("ERROR_CODE_GAMMA found\n");
+            } else {
+                try file.writeAll("normal line content here\n");
+            }
+        }
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-c", "ERROR_CODE_ALPHA|ERROR_CODE_BETA|ERROR_CODE_GAMMA", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find exactly 3 matches
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "3") != null);
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+}
+
+test "integration: alternation single character patterns" {
+    // Test alternation with single character alternatives
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_singlechar_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        try file.writeAll("line with a\n");
+        try file.writeAll("line with b\n");
+        try file.writeAll("line with c\n");
+        try file.writeAll("line with d\n");
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "-c", "a|b|c", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find 3 matching lines (a, b, c but not d)
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "3") != null);
+}
+
+test "integration: alternation special chars in patterns" {
+    // Test alternation with underscores and numbers (common in code)
+    const allocator = std.testing.allocator;
+    const temp_path = "/tmp/zipgrep_alternation_special_test.txt";
+
+    {
+        const file = try std.fs.cwd().createFile(temp_path, .{});
+        defer file.close();
+        try file.writeAll("CONFIG_DEBUG_123 enabled\n");
+        try file.writeAll("some other line\n");
+        try file.writeAll("FLAG_VERBOSE_456 set\n");
+        try file.writeAll("another line\n");
+        try file.writeAll("OPT_TRACE_789 active\n");
+    }
+    defer std.fs.cwd().deleteFile(temp_path) catch {};
+
+    const result = try runZipgrep(allocator, &.{ "CONFIG_DEBUG_123|FLAG_VERBOSE_456|OPT_TRACE_789", temp_path });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Should find all 3 pattern matches
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "CONFIG_DEBUG_123") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "FLAG_VERBOSE_456") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "OPT_TRACE_789") != null);
+}
